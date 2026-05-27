@@ -69,6 +69,197 @@ class EmulatorAutomator:
                 return True
         return False
 
+    def dismiss_crash_dialogs(self):
+        """Close common Android/Google crash dialogs without changing the main flow."""
+        dialog_buttons = [
+            "Close app",
+            "App info",
+            "OK",
+            "Got it",
+            "No thanks",
+            "Not now",
+            "Skip",
+            "Tutup aplikasi",
+            "Oke",
+            "Nanti saja",
+        ]
+        for text in dialog_buttons:
+            try:
+                if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(1)):
+                    self.log_warn(f"Dismissed dialog/button: {text}")
+                    pause(0.5)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _shell_output(self, command):
+        result = self.device.shell(command)
+        if isinstance(result, str):
+            return result
+        if hasattr(result, "output"):
+            return result.output or ""
+        if isinstance(result, (list, tuple)) and result:
+            return str(result[0] or "")
+        return str(result or "")
+
+    def _dumpsys_account_output(self):
+        try:
+            return self._shell_output("dumpsys account")
+        except Exception as e:
+            self.log_error(f"Failed reading dumpsys account: {e}")
+            return ""
+
+    def _has_google_account_dumpsys(self):
+        out = self._dumpsys_account_output().lower()
+        return "type=com.google" in out or "com.google" in out
+
+    def _verify_google_account_dumpsys(self, email):
+        out = self._dumpsys_account_output().lower()
+        detected = email.strip().lower() in out and "com.google" in out
+        if detected:
+            self.log_info(f"Account terdeteksi di dumpsys: {email}")
+        return detected
+
+    def click_candidates(self, resource_ids=None, texts=None, timeout=3):
+        resource_ids = resource_ids or []
+        texts = texts or []
+
+        if texts:
+            for resource_id in resource_ids:
+                for text in texts:
+                    try:
+                        if self.device(resourceId=resource_id, textMatches="(?i)" + text).click_exists(timeout=action_timeout(timeout)):
+                            self.log_info(f"Clicked by resource-id/text: {resource_id} / {text}")
+                            return True
+                    except Exception:
+                        continue
+        else:
+            for resource_id in resource_ids:
+                try:
+                    if self.device(resourceId=resource_id).click_exists(timeout=action_timeout(timeout)):
+                        self.log_info(f"Clicked by resource-id: {resource_id}")
+                        return True
+                except Exception:
+                    continue
+
+        for text in texts:
+            try:
+                if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(timeout)):
+                    self.log_info(f"Clicked by text: {text}")
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    def login_google(self, email, password):
+        try:
+            self.log_info("Opening Accounts page via SYNC_SETTINGS shortcut intent")
+            self.device.shell("am start -a android.settings.SYNC_SETTINGS")
+            pause(2)
+            self.dismiss_crash_dialogs()
+
+            if self._has_google_account_dumpsys():
+                self.log_warn("Google account existing detected in dumpsys. Stop login to avoid duplicate account.")
+                return False
+
+            self.log_info("No existing Google account detected, continuing Add account flow")
+            if not self.click_candidates(
+                resource_ids=["android:id/title"],
+                texts=["Add account", "Tambah akun", "Add an account"],
+                timeout=4,
+            ):
+                self.log_error("Cannot find Add account button")
+                return False
+
+            pause(1)
+            self.dismiss_crash_dialogs()
+
+            if not self.click_candidates(
+                resource_ids=["android:id/title"],
+                texts=["Google"],
+                timeout=5,
+            ):
+                self.log_error("Cannot find Google account provider")
+                return False
+
+            pause(3)
+            self.dismiss_crash_dialogs()
+
+            self.log_info(f"Input Google email: {email}")
+            self.device(className="android.widget.EditText").set_text(email)
+            pause(0.5)
+            self.click_candidates(
+                resource_ids=["identifierNext", "com.google.android.gms:id/identifierNext"],
+                texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
+                timeout=5,
+            )
+            pause(2)
+            self.dismiss_crash_dialogs()
+
+            self.log_info("Input Google password")
+            self.device(className="android.widget.EditText").set_text(password)
+            pause(1)
+            self.click_candidates(
+                resource_ids=["passwordNext", "com.google.android.gms:id/passwordNext"],
+                texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
+                timeout=5,
+            )
+            pause(3)
+            self.dismiss_crash_dialogs()
+
+            confirmation_buttons = [
+                "I UNDERSTAND",
+                "I agree",
+                "MORE",
+                "ACCEPT",
+                "Saya setuju",
+                "Lainnya",
+                "Terima",
+            ]
+
+            for _ in range(8):
+                clicked = self.click_candidates(
+                    resource_ids=[
+                        "com.google.android.gms:id/next_button",
+                        "com.google.android.gms:id/suw_navbar_next",
+                        "android:id/button1",
+                    ],
+                    texts=confirmation_buttons,
+                    timeout=3,
+                )
+                self.dismiss_crash_dialogs()
+                if not clicked:
+                    break
+                pause(1)
+
+            if self._verify_google_account_dumpsys(email):
+                return True
+
+            self.log_info("Account belum sync, mulai polling dumpsys account")
+            for attempt in range(1, 7):
+                pause(3)
+                if self._verify_google_account_dumpsys(email):
+                    return True
+                self.log_info(f"Account belum sync, tunggu 3s... ({attempt}/6)")
+
+            self.log_error(f"Google account failed dumpsys verification: {email}")
+            return False
+        except Exception as e:
+            self.log_error(f"Error login_google for {email}: {e}")
+            return False
+
+    def has_paysafecard_payment_method(self, timeout=8):
+        try:
+            detected = self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=action_timeout(timeout))
+            if detected:
+                self.log_info("PaysafeCard payment method detected on Play Store Payment methods page")
+            return detected
+        except Exception as e:
+            self.log_error(f"Error detecting PaysafeCard payment method: {e}")
+            return False
+
     def fast_handle_popups(self):
         """Optimized popup handling with concurrent checking"""
         self.log_info("Checking for popups...")
@@ -156,53 +347,9 @@ class EmulatorAutomator:
             self.log_info(f"====== STARTING NEW ACCOUNT PROCESS ======")
             self.log_info(f"Email: {email}, Paysafecard: {psc_email}")
             
-            # Quick home and settings
-            self.device.press("home")
-            pause(0.5)
-            
-            self.device.app_start("com.android.settings")
-            pause(1)
-
-            # Fast navigation
-            self.device(scrollable=True).scroll.to(text="Passwords & accounts")
-            self.device(text="Passwords & accounts").click()
-            pause(1)
-            
-            # Quick Google account addition
-            self.device(text="Add account").click()
-            pause(1)
-            self.device(text="Google").click()
-            pause(3)
-            
-            # Fast email input
-            self.device(className="android.widget.EditText").set_text(email)
-            pause(0.5)
-            
-            self.fast_click_text(["NEXT", "Next", "Berikutnya", "BERIKUTNYA"])
-            pause(2)
-
-            # Wait for password form
-            self.device(text="Add PaysafeCard").exists(timeout=action_timeout(8))
-            
-            # Fast password input
-            self.device(className="android.widget.EditText").set_text(password)
-            pause(2)
-            
-            self.fast_click_text(["NEXT", "Next", "Berikutnya", "BERIKUTNYA"])
-            pause(3)
-
-            # Handle confirmations quickly
-            confirmation_buttons = [
-                ("I UNDERSTAND", 10),
-                ("I agree", 10),
-                ("MORE", 10),
-                ("ACCEPT", 10)
-            ]
-            
-            for button_text, timeout in confirmation_buttons:
-                if self.device(textMatches=f"(?i){button_text}").click_exists(timeout=action_timeout(timeout)):
-                    self.log_info(f"Clicked {button_text}")
-                    pause(1)
+            if not self.login_google(email, password):
+                self.log_error(f"Google login/register failed for {email}")
+                return False
 
             # Quick Play Store launch
             self.device.press("home")
@@ -248,7 +395,7 @@ class EmulatorAutomator:
                 pause(2)
 
             # Check if DOKU already exists
-            if self.device(textStartsWith="paysafecard:").exists(timeout=action_timeout(3)):
+            if self.has_paysafecard_payment_method(timeout=3):
                 self.log_info(f"✅ DOKU already exists on account {email}")
                 
                 # Save successful account (DOKU sudah ada)
@@ -301,7 +448,7 @@ class EmulatorAutomator:
             pause(3)
 
             # Quick success verification - PENTING: Hanya save jika benar-benar berhasil
-            if self.device(textStartsWith="PaysafeCard:").exists(timeout=action_timeout(8)):
+            if self.has_paysafecard_payment_method(timeout=8):
                 self.log_info(f"✅ PaysafeCard successfully added to account {email}")
                 
                 # HANYA save ke file hasil jika DOKU benar-benar berhasil ditambahkan

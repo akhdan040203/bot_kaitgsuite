@@ -176,59 +176,6 @@ function runPscWorker(order, attempt) {
   });
 }
 
-function runGsuiteChecker(order, round, checkerInputFile, verifiedFile) {
-  return new Promise((resolve, reject) => {
-    const verifyFile = path.join(order.orderPath, "verif-gsuite.txt");
-    const emptyFile = path.join(order.orderPath, "gsuite-kosong.txt");
-    const logFile = path.join(order.orderPath, "checker.log");
-    const threads = String(Math.min(30, Math.max(1, Number(process.env.CHECKER_THREADS || 1))));
-    const limit = String(countLines(checkerInputFile));
-
-    fs.mkdirSync(order.orderPath, { recursive: true });
-    fs.appendFileSync(logFile, `\n===== CHECKER ROUND ${round} ${new Date().toISOString()} =====\n`);
-
-    const args = [
-      path.join(__dirname, "checker.js"),
-      "--input-file",
-      checkerInputFile,
-      "--success-file",
-      verifiedFile,
-      "--verify-file",
-      verifyFile,
-      "--empty-file",
-      emptyFile,
-      "--threads",
-      threads,
-      "--limit",
-      limit,
-    ];
-
-    log(`order #${order.id} checker round ${round}: spawning node checker.js input=${limit} threads=${threads}`);
-    const child = spawn(process.execPath, args, { cwd: __dirname, windowsHide: true });
-
-    child.stdout.on("data", (chunk) => {
-      fs.appendFileSync(logFile, chunk);
-      process.stdout.write(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      fs.appendFileSync(logFile, chunk);
-      process.stderr.write(chunk);
-    });
-    child.on("error", (error) => {
-      log(`checker spawn error: ${error.message}`);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      log(`order #${order.id} checker round ${round}: exited with code ${code}`);
-      if (code !== 0) {
-        reject(new Error(`checker.js exited with code ${code}`));
-        return;
-      }
-      resolve({ logFile, verifyFile, emptyFile });
-    });
-  });
-}
-
 async function processOrder(order) {
   log(`picked order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts}`);
   updateOrder(order.id, { status: "RUNNING", startedAt: new Date().toISOString() });
@@ -241,12 +188,10 @@ async function processOrder(order) {
 
   try {
     const maxAttempts = Math.max(1, Number(process.env.PSC_MAX_RETRY_PASSES || 3));
-    const maxVerifyRounds = Math.max(1, Number(process.env.PSC_VERIFY_MAX_ROUNDS || 3));
+    const maxRetryRounds = Math.max(1, Number(process.env.PSC_VERIFY_MAX_ROUNDS || 3));
     const remainingInputFile = path.join(order.orderPath, "input.txt");
     const originalInputFile = path.join(order.orderPath, "original-input.txt");
     let resultFile = path.join(order.orderPath, "success.txt");
-    const verifiedFile = path.join(order.orderPath, "hasil-checker.txt");
-    const checkerInputFile = path.join(order.orderPath, "check-gsuite.txt");
     let logFile = path.join(order.orderPath, "worker.log");
 
     if (!fs.existsSync(originalInputFile)) {
@@ -256,20 +201,20 @@ async function processOrder(order) {
     const originalAccounts = readLines(originalInputFile);
     const totalAccounts = originalAccounts.length || Number(order.totalAccounts || 0);
 
-    for (let round = 1; round <= maxVerifyRounds; round++) {
-      const verifiedBeforeRound = countLines(verifiedFile);
-      const accountsToLink = subtractLines(originalAccounts, readLines(verifiedFile));
+    for (let round = 1; round <= maxRetryRounds; round++) {
+      const successBeforeRound = countLines(resultFile);
+      const accountsToLink = subtractLines(originalAccounts, readLines(resultFile));
 
       if (accountsToLink.length === 0) break;
 
       writeLines(remainingInputFile, accountsToLink);
       updateOrder(order.id, {
         phase: round === 1 ? "LINKING" : "RETRY_LINKING",
-        verifyRound: round,
+        retryRound: round,
         remainingCount: accountsToLink.length,
       });
       log(
-        `order #${order.id} verify round ${round}/${maxVerifyRounds}: linking ${accountsToLink.length} account(s), verified=${verifiedBeforeRound}/${totalAccounts}`
+        `order #${order.id} retry round ${round}/${maxRetryRounds}: linking ${accountsToLink.length} account(s), success=${successBeforeRound}/${totalAccounts}`
       );
       await editNotify(
         order.telegramId,
@@ -277,9 +222,9 @@ async function processOrder(order) {
         renderProgress(
           order,
           round === 1 ? "Ngait akun" : "Retry ngait akun",
-          verifiedBeforeRound,
+          successBeforeRound,
           totalAccounts,
-          `Ronde ${round}/${maxVerifyRounds}. Sisa dicek: ${accountsToLink.length}`
+          `Ronde ${round}/${maxRetryRounds}. Sisa akun: ${accountsToLink.length}`
         )
       );
 
@@ -295,7 +240,7 @@ async function processOrder(order) {
           `order #${order.id} round ${round} attempt ${attempt}/${maxAttempts} linked=${successCountAfterAttempt} remaining=${remainingCountAfterAttempt}`
         );
         const linkedThisRound = Math.max(0, accountsToLink.length - remainingCountAfterAttempt);
-        const ngaitProgress = Math.min(totalAccounts, verifiedBeforeRound + linkedThisRound);
+        const ngaitProgress = Math.min(totalAccounts, successBeforeRound + linkedThisRound);
         await editNotify(
           order.telegramId,
           progressMessageId,
@@ -304,13 +249,13 @@ async function processOrder(order) {
             "Ngait akun",
             ngaitProgress,
             totalAccounts,
-            `Ronde ${round}/${maxVerifyRounds}, attempt ${attempt}/${maxAttempts}. Menunggu checker untuk validasi akhir.`
+            `Ronde ${round}/${maxRetryRounds}, attempt ${attempt}/${maxAttempts}. Validasi langsung dari layar Play Store.`
           )
         );
 
         if (remainingCountAfterAttempt === 0) break;
         if (remainingCountAfterAttempt >= lastRemainingCount) {
-          log(`order #${order.id} no linking progress on round ${round} attempt ${attempt}, moving to checker`);
+          log(`order #${order.id} no linking progress on round ${round} attempt ${attempt}, retry round will continue if available`);
           break;
         }
 
@@ -322,58 +267,33 @@ async function processOrder(order) {
         });
       }
 
-      const checkerCandidates = subtractLines(readLines(resultFile), readLines(verifiedFile));
-      writeLines(checkerInputFile, checkerCandidates);
-
-      if (checkerCandidates.length > 0) {
-        updateOrder(order.id, {
-          phase: "CHECKING_GSUITE",
-          checkerInputCount: checkerCandidates.length,
-        });
-        log(`order #${order.id} checker round ${round}: checking ${checkerCandidates.length} linked candidate(s)`);
-        await editNotify(
-          order.telegramId,
-          progressMessageId,
-          renderProgress(
-            order,
-            "Checker GSuite",
-            verifiedBeforeRound,
-            totalAccounts,
-            `Mengecek ${checkerCandidates.length} akun yang sudah berhasil ngait.`
-          )
-        );
-        await runGsuiteChecker(order, round, checkerInputFile, verifiedFile);
-      } else {
-        log(`order #${order.id} checker round ${round}: no new linked candidates to check`);
-      }
-
-      const verifiedAfterRound = countLines(verifiedFile);
-      const unverifiedCount = Math.max(0, totalAccounts - verifiedAfterRound);
+      const successAfterRound = countLines(resultFile);
+      const unverifiedCount = Math.max(0, totalAccounts - successAfterRound);
       updateOrder(order.id, {
-        verifiedCount: verifiedAfterRound,
+        successCount: successAfterRound,
         remainingCount: unverifiedCount,
       });
 
-      log(`order #${order.id} checker round ${round} result verified=${verifiedAfterRound}/${totalAccounts}`);
+      log(`order #${order.id} round ${round} result success=${successAfterRound}/${totalAccounts}`);
       await editNotify(
         order.telegramId,
         progressMessageId,
         renderProgress(
           order,
-          "Lolos checker",
-          verifiedAfterRound,
+          "Validasi Play Store",
+          successAfterRound,
           totalAccounts,
-          unverifiedCount ? `Belum lolos: ${unverifiedCount}. Akan retry jika ronde masih ada.` : "Semua akun sudah lolos checker."
+          unverifiedCount ? `Belum berhasil: ${unverifiedCount}. Akan retry jika ronde masih ada.` : "Semua akun sudah terlihat PaysafeCard di Play Store."
         )
       );
-      if (verifiedAfterRound >= totalAccounts) break;
-      if (verifiedAfterRound <= verifiedBeforeRound) {
-        log(`order #${order.id} no verified progress on round ${round}, retrying remaining accounts if retry rounds are left`);
+      if (successAfterRound >= totalAccounts) break;
+      if (successAfterRound <= successBeforeRound) {
+        log(`order #${order.id} no success progress on round ${round}, retrying remaining accounts if retry rounds are left`);
       }
     }
 
-    const successCount = countLines(verifiedFile);
-    const remainingUnverified = subtractLines(originalAccounts, readLines(verifiedFile));
+    const successCount = countLines(resultFile);
+    const remainingUnverified = subtractLines(originalAccounts, readLines(resultFile));
     const remainingCount = remainingUnverified.length;
     const failedCount = remainingCount;
     const remainingUnverifiedFile = path.join(order.orderPath, "remaining-unverified.txt");
@@ -386,9 +306,8 @@ async function processOrder(order) {
       failedCount,
       remainingCount,
       retryAttempts: maxAttempts,
-      verifyRounds: maxVerifyRounds,
-      resultFile: verifiedFile,
-      rawLinkedFile: resultFile,
+      retryRounds: maxRetryRounds,
+      resultFile,
       logFile,
       finishedAt: new Date().toISOString(),
     });
@@ -401,7 +320,7 @@ async function processOrder(order) {
         "Selesai",
         successCount,
         totalAccounts,
-        remainingCount ? `Berhasil: ${successCount}. Gagal/belum lolos: ${remainingCount}.` : "Semua akun berhasil."
+        remainingCount ? `Berhasil: ${successCount}. Gagal/belum berhasil: ${remainingCount}.` : "Semua akun berhasil."
       )
     );
 
@@ -420,15 +339,15 @@ async function processOrder(order) {
         `Order #${order.id} selesai.`,
         "",
         `Total: ${order.totalAccounts}`,
-      `Berhasil dicek: ${successCount}`,
-      `Belum lolos checker: ${remainingCount}`,
+      `Berhasil: ${successCount}`,
+      `Gagal/belum berhasil: ${remainingCount}`,
     ].join("\n")
     );
     if (successCount > 0) {
-      await sendDocument(order.telegramId, verifiedFile, `Hasil akun sudah ngait dan lolos checker order #${order.id}`);
+      await sendDocument(order.telegramId, resultFile, `Hasil akun berhasil ngait order #${order.id}`);
     }
     if (remainingCount > 0) {
-      await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun belum lolos checker order #${order.id}`);
+      await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
     }
   } catch (error) {
     log(`order #${order.id} FAILED ${error.message}`);
