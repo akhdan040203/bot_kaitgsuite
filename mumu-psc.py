@@ -12,6 +12,22 @@ import argparse
 INPUT_FILE = "gsuite.txt"
 RESULT_FILE = "Hasil-Gdoku.txt"
 
+def env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+U2_WAIT_TIMEOUT = env_float("U2_WAIT_TIMEOUT", 20)
+ACTION_TIMEOUT_MULTIPLIER = env_float("U2_ACTION_TIMEOUT_MULTIPLIER", 2)
+SLEEP_MULTIPLIER = env_float("U2_SLEEP_MULTIPLIER", 1.5)
+
+def action_timeout(seconds):
+    return max(1, int(round(float(seconds) * ACTION_TIMEOUT_MULTIPLIER)))
+
+def pause(seconds):
+    time.sleep(float(seconds) * SLEEP_MULTIPLIER)
+
 class EmulatorAutomator:
     def __init__(self, port, name):
         self.port = port
@@ -38,19 +54,18 @@ class EmulatorAutomator:
         try:
             self.log_info(f"Connecting to emulator at 127.0.0.1:{self.port}...")
             self.device = u2.connect(f"127.0.0.1:{self.port}")
-            # Reduce timeout for faster response
-            self.device.settings['wait_timeout'] = 10
-            self.device.settings['operation_delay'] = (0, 0.5)  # Reduce delay between operations
+            self.device.settings['wait_timeout'] = U2_WAIT_TIMEOUT
+            self.device.settings['operation_delay'] = (0.2, 0.8)
             self.log_info("Successfully connected to emulator.")
             return True
         except Exception as e:
             self.log_error(f"Failed to connect to emulator: {e}")
             return False
 
-    def fast_click_text(self, text_list, timeout=2):
-        """Optimized text clicking with reduced timeout"""
+    def fast_click_text(self, text_list, timeout=3):
+        """Text clicking with configurable timeout for slower RDP/emulator sessions"""
         for text in text_list:
-            if self.device(textMatches="(?i)" + text).click_exists(timeout=timeout):
+            if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(timeout)):
                 return True
         return False
 
@@ -69,10 +84,10 @@ class EmulatorAutomator:
         ]
         
         for text, action in popup_elements:
-            if self.device(text=text).exists(timeout=1):
+            if self.device(text=text).exists(timeout=action_timeout(1)):
                 self.log_info(f"Found popup '{text}', handling...")
                 action()
-                time.sleep(0.5)  # Reduced sleep time
+                pause(0.5)
                 break
         
         self.log_info("Popup check completed")
@@ -85,36 +100,36 @@ class EmulatorAutomator:
             
             # Quick app start
             self.device.app_start("com.android.settings")
-            time.sleep(1)  # Reduced from 2
+            pause(1)
             
             # Fast navigation to Passwords & accounts
-            if not self.device(text="Passwords & accounts").click_exists(timeout=3):
+            if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(3)):
                 self.device(scrollable=True).scroll.to(text="Passwords & accounts")
-                if not self.device(text="Passwords & accounts").click_exists(timeout=2):
+                if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(2)):
                     self.log_error(f"Cannot find Passwords & accounts menu")
                     return False
 
-            time.sleep(1)  # Reduced from 2
+            pause(1)
             
             # Quick email account search and click
-            if not self.device(text=f"{email}").click_exists(timeout=5):
+            if not self.device(text=f"{email}").click_exists(timeout=action_timeout(5)):
                 self.device(scrollable=True).scroll.to(text=f"{email}")
-                if not self.device(text=f"{email}").click_exists(timeout=3):
+                if not self.device(text=f"{email}").click_exists(timeout=action_timeout(3)):
                     self.log_error(f"Cannot find account {email}")
                     return False
             
-            time.sleep(1)  # Reduced from 2
+            pause(1)
 
             # Fast remove account
             remove_texts = ["REMOVE ACCOUNT", "Remove account", "Hapus akun", "HAPUS AKUN"]
             removed = False
             
             for text in remove_texts:
-                if self.device(text=text).click_exists(timeout=2):
+                if self.device(text=text).click_exists(timeout=action_timeout(2)):
                     self.log_info(f"Clicked '{text}'")
-                    time.sleep(0.5)
+                    pause(0.5)
                     # Double confirmation
-                    self.device(text=text).click_exists(timeout=2)
+                    self.device(text=text).click_exists(timeout=action_timeout(2))
                     removed = True
                     break
 
@@ -122,10 +137,10 @@ class EmulatorAutomator:
                 self.log_error(f"Cannot find Remove Account button")
                 return False
 
-            time.sleep(2)  # Reduced from 3
+            pause(2)
             
             # Quick verification
-            if self.device(text=f"{email}").exists(timeout=3):
+            if self.device(text=f"{email}").exists(timeout=action_timeout(3)):
                 self.log_error(f"Account {email} still detected after removal")
                 return False
             
@@ -143,38 +158,38 @@ class EmulatorAutomator:
             
             # Quick home and settings
             self.device.press("home")
-            time.sleep(0.5)  # Reduced from 1
+            pause(0.5)
             
             self.device.app_start("com.android.settings")
-            time.sleep(1)  # Reduced from 2
+            pause(1)
 
             # Fast navigation
             self.device(scrollable=True).scroll.to(text="Passwords & accounts")
             self.device(text="Passwords & accounts").click()
-            time.sleep(1)  # Reduced from 2
+            pause(1)
             
             # Quick Google account addition
             self.device(text="Add account").click()
-            time.sleep(1)  # Reduced from 2
+            pause(1)
             self.device(text="Google").click()
-            time.sleep(3)  # Reduced from 5
+            pause(3)
             
             # Fast email input
             self.device(className="android.widget.EditText").set_text(email)
-            time.sleep(0.5)  # Reduced from 1
+            pause(0.5)
             
             self.fast_click_text(["NEXT", "Next", "Berikutnya", "BERIKUTNYA"])
-            time.sleep(2)  # Reduced from 3
+            pause(2)
 
             # Wait for password form
-            self.device(text="Add PaysafeCard").exists(timeout=8)  # Reduced from 10
+            self.device(text="Add PaysafeCard").exists(timeout=action_timeout(8))
             
             # Fast password input
             self.device(className="android.widget.EditText").set_text(password)
-            time.sleep(2)  # Reduced from 3
+            pause(2)
             
             self.fast_click_text(["NEXT", "Next", "Berikutnya", "BERIKUTNYA"])
-            time.sleep(3)  # Reduced from 3
+            pause(3)
 
             # Handle confirmations quickly
             confirmation_buttons = [
@@ -185,14 +200,14 @@ class EmulatorAutomator:
             ]
             
             for button_text, timeout in confirmation_buttons:
-                if self.device(textMatches=f"(?i){button_text}").click_exists(timeout=timeout):
+                if self.device(textMatches=f"(?i){button_text}").click_exists(timeout=action_timeout(timeout)):
                     self.log_info(f"Clicked {button_text}")
-                    time.sleep(1)  # Reduced from 2
+                    pause(1)
 
             # Quick Play Store launch
             self.device.press("home")
             self.device.app_start("com.android.vending")
-            time.sleep(5)  # Reduced from 5
+            pause(5)
 
             # Fast popup handling
             self.fast_handle_popups()
@@ -200,8 +215,8 @@ class EmulatorAutomator:
             # Optimized account clicking with multiple strategies
             account_clicked = False
             click_strategies = [
-                lambda: self.device(descriptionContains="Account").click_exists(timeout=2),
-                lambda: self.device(resourceId="com.android.vending:id/account_menu_item").click_exists(timeout=2),
+                lambda: self.device(descriptionContains="Account").click_exists(timeout=action_timeout(2)),
+                lambda: self.device(resourceId="com.android.vending:id/account_menu_item").click_exists(timeout=action_timeout(2)),
                 lambda: (self.device.click(450, 100), True)[1]  # Coordinate fallback
             ]
             
@@ -216,9 +231,9 @@ class EmulatorAutomator:
                     
                 if i < len(click_strategies) - 1:  # Don't handle popups on last attempt
                     self.fast_handle_popups()
-                    time.sleep(1)
+                    pause(1)
 
-            time.sleep(2)  # Reduced from 2
+            pause(2)
 
             # Fast navigation to payment methods
             payment_menus = [
@@ -227,13 +242,13 @@ class EmulatorAutomator:
             ]
             
             for en_text, id_text in payment_menus:
-                if not (self.device(text=en_text).click_exists(timeout=2) or 
-                       self.device(text=id_text).click_exists(timeout=2)):
+                if not (self.device(text=en_text).click_exists(timeout=action_timeout(2)) or 
+                       self.device(text=id_text).click_exists(timeout=action_timeout(2))):
                     self.log_warn(f"Could not find {en_text}")
-                time.sleep(2)  # Reduced from 2-3
+                pause(2)
 
             # Check if DOKU already exists
-            if self.device(textStartsWith="paysafecard:").exists(timeout=3):
+            if self.device(textStartsWith="paysafecard:").exists(timeout=action_timeout(3)):
                 self.log_info(f"✅ DOKU already exists on account {email}")
                 
                 # Save successful account (DOKU sudah ada)
@@ -248,45 +263,45 @@ class EmulatorAutomator:
                     return False
             
             # Fast DOKU addition
-            if not self.device(text="Add PaysafeCard").click_exists(timeout=8):
+            if not self.device(text="Add PaysafeCard").click_exists(timeout=action_timeout(8)):
                 self.log_error("Add PaysafeCard button not found")
                 self.fast_remove_google_account(email)
                 return False
                 
             self.log_info("Add PaysafeCard button found and clicked")
-            time.sleep(1)  # Reduced from 2
+            pause(1)
 
             self.fast_click_text(["Continue", "CONTINUE", "Lanjutkan", "LANJUTKAN"])
-            time.sleep(1)  # Reduced from 2
+            pause(1)
             
             # Input Paysafecard account used for connecting in Play Store.
             self.device(className="android.widget.EditText", instance=0).set_text(psc_email)
             self.device(className="android.widget.EditText", instance=1).set_text(psc_pass)
-            time.sleep(5)
-            if self.device(text="Connect").exists(timeout=2):
+            pause(5)
+            if self.device(text="Connect").exists(timeout=action_timeout(2)):
                 self.log_info("Connect button detected")
-            time.sleep(2)
+            pause(2)
             self.click_connect_button()
-            self.handle_connect_error_and_retry(max_retry=3)
-            time.sleep(2)
-            time.sleep(2)
+            self.handle_connect_error_and_retry(max_retry=int(os.getenv("PSC_CONNECT_RETRY", "5")))
+            pause(2)
+            pause(2)
 
             # Wait for DOKU e-Wallet process
-            if self.device(text="PaysafeCard").exists(timeout=3):
-                self.device(text="PaysafeCard").wait_gone(timeout=3)
+            if self.device(text="PaysafeCard").exists(timeout=action_timeout(3)):
+                self.device(text="PaysafeCard").wait_gone(timeout=action_timeout(3))
 
             # Fast complete sign up
-            if self.device(text="Complete sign up").exists(timeout=5):
+            if self.device(text="Complete sign up").exists(timeout=action_timeout(5)):
                 self.device(text="Full name").click()
-                time.sleep(0.5)
+                pause(0.5)
                 self.device(text="Full name").set_text("indonesian")
                 self.fast_click_text(["Save", "SAVE", "Simpan", "SIMPAN"])
-                time.sleep(3)  # Reduced from 3
+                pause(3)
 
-            time.sleep(3)  # Reduced from 5
+            pause(3)
 
             # Quick success verification - PENTING: Hanya save jika benar-benar berhasil
-            if self.device(textStartsWith="PaysafeCard:").exists(timeout=8):
+            if self.device(textStartsWith="PaysafeCard:").exists(timeout=action_timeout(8)):
                 self.log_info(f"✅ PaysafeCard successfully added to account {email}")
                 
                 # HANYA save ke file hasil jika DOKU benar-benar berhasil ditambahkan
@@ -335,7 +350,7 @@ class EmulatorAutomator:
 
     def click_connect_button(self):
         # 1. Cari tombol dengan text "Connect" (case-insensitive)
-        if self.device(textMatches="(?i)connect").exists(timeout=1):
+        if self.device(textMatches="(?i)connect").exists(timeout=action_timeout(1)):
             self.device(textMatches="(?i)connect").click()
             self.log_info("Clicked Connect by text")
             return True
@@ -374,19 +389,19 @@ class EmulatorAutomator:
     def handle_connect_error_and_retry(self, max_retry=3):
         retry = 0
         while retry < max_retry:
-            time.sleep(2)
+            pause(2)
             # Deteksi popup error
-            if self.device(text="We ran into a problem").exists(timeout=2):
+            if self.device(text="We ran into a problem").exists(timeout=action_timeout(2)):
                 self.log_warn("Detected error popup after Connect, will close and retry...")
                 # Klik tombol X (close)
-                if self.device(description="Close").exists(timeout=1):
+                if self.device(description="Close").exists(timeout=action_timeout(1)):
                     self.device(description="Close").click()
-                elif self.device(text="×").exists(timeout=1):
+                elif self.device(text="×").exists(timeout=action_timeout(1)):
                     self.device(text="×").click()
                 else:
                     # Klik koordinat pojok kiri atas (X)
                     self.device.click(40, 60)
-                time.sleep(1)
+                pause(1)
                 # Coba klik Connect lagi
                 self.click_connect_button()
                 retry += 1

@@ -1,0 +1,7 @@
+uiautomator2
+python-dotenv
+flask
+faker
+aiohttp
+colorama
+tabulate

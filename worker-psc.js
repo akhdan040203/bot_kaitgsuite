@@ -27,13 +27,30 @@ function sleep(ms) {
 async function notify(chatId, text) {
   if (!API || !chatId) return;
   try {
-    await axios.post(
+    const { data } = await axios.post(
       `${API}/sendMessage`,
       { chat_id: chatId, text, parse_mode: "HTML" },
       { timeout: 30000 }
     );
+    return data.result;
   } catch (error) {
     console.error(`[notify] ${error.message}`);
+  }
+}
+
+async function editNotify(chatId, messageId, text) {
+  if (!API || !chatId || !messageId) return;
+  try {
+    const { data } = await axios.post(
+      `${API}/editMessageText`,
+      { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" },
+      { timeout: 30000 }
+    );
+    return data.result;
+  } catch (error) {
+    if (!String(error.message).includes("400")) {
+      console.error(`[editNotify] ${error.message}`);
+    }
   }
 }
 
@@ -94,6 +111,24 @@ function writeLines(filePath, lines) {
 function subtractLines(sourceLines, removeLines) {
   const removeSet = new Set(removeLines.map((line) => line.trim().toLowerCase()));
   return uniqueLines(sourceLines).filter((line) => !removeSet.has(line.toLowerCase()));
+}
+
+function progressBar(done, total) {
+  const safeTotal = Math.max(1, Number(total || 0));
+  const safeDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  const percent = Math.floor((safeDone / safeTotal) * 100);
+  const filled = Math.floor(percent / 10);
+  return `[${"█".repeat(filled)}${"░".repeat(10 - filled)}] ${percent}%`;
+}
+
+function renderProgress(order, phase, done, total, detail = "") {
+  return [
+    `<b>Progress Order #${order.id}</b>`,
+    "",
+    progressBar(done, total),
+    `${phase}: ${done}/${total}`,
+    detail,
+  ].filter(Boolean).join("\n");
 }
 
 function runPscWorker(order, attempt) {
@@ -198,7 +233,11 @@ async function processOrder(order) {
   log(`picked order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts}`);
   updateOrder(order.id, { status: "RUNNING", startedAt: new Date().toISOString() });
   log(`order #${order.id} status RUNNING`);
-  await notify(order.telegramId, `Order #${order.id} mulai diproses. Total akun: ${order.totalAccounts}.`);
+  const initialProgress = await notify(
+    order.telegramId,
+    renderProgress(order, "Menunggu worker", 0, order.totalAccounts, "Order mulai diproses.")
+  );
+  const progressMessageId = initialProgress?.message_id;
 
   try {
     const maxAttempts = Math.max(1, Number(process.env.PSC_MAX_RETRY_PASSES || 3));
@@ -232,6 +271,17 @@ async function processOrder(order) {
       log(
         `order #${order.id} verify round ${round}/${maxVerifyRounds}: linking ${accountsToLink.length} account(s), verified=${verifiedBeforeRound}/${totalAccounts}`
       );
+      await editNotify(
+        order.telegramId,
+        progressMessageId,
+        renderProgress(
+          order,
+          round === 1 ? "Ngait akun" : "Retry ngait akun",
+          verifiedBeforeRound,
+          totalAccounts,
+          `Ronde ${round}/${maxVerifyRounds}. Sisa dicek: ${accountsToLink.length}`
+        )
+      );
 
       let lastRemainingCount = countLines(remainingInputFile);
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -243,6 +293,19 @@ async function processOrder(order) {
         const remainingCountAfterAttempt = countLines(remainingInputFile);
         log(
           `order #${order.id} round ${round} attempt ${attempt}/${maxAttempts} linked=${successCountAfterAttempt} remaining=${remainingCountAfterAttempt}`
+        );
+        const linkedThisRound = Math.max(0, accountsToLink.length - remainingCountAfterAttempt);
+        const ngaitProgress = Math.min(totalAccounts, verifiedBeforeRound + linkedThisRound);
+        await editNotify(
+          order.telegramId,
+          progressMessageId,
+          renderProgress(
+            order,
+            "Ngait akun",
+            ngaitProgress,
+            totalAccounts,
+            `Ronde ${round}/${maxVerifyRounds}, attempt ${attempt}/${maxAttempts}. Menunggu checker untuk validasi akhir.`
+          )
         );
 
         if (remainingCountAfterAttempt === 0) break;
@@ -268,6 +331,17 @@ async function processOrder(order) {
           checkerInputCount: checkerCandidates.length,
         });
         log(`order #${order.id} checker round ${round}: checking ${checkerCandidates.length} linked candidate(s)`);
+        await editNotify(
+          order.telegramId,
+          progressMessageId,
+          renderProgress(
+            order,
+            "Checker GSuite",
+            verifiedBeforeRound,
+            totalAccounts,
+            `Mengecek ${checkerCandidates.length} akun yang sudah berhasil ngait.`
+          )
+        );
         await runGsuiteChecker(order, round, checkerInputFile, verifiedFile);
       } else {
         log(`order #${order.id} checker round ${round}: no new linked candidates to check`);
@@ -281,10 +355,20 @@ async function processOrder(order) {
       });
 
       log(`order #${order.id} checker round ${round} result verified=${verifiedAfterRound}/${totalAccounts}`);
+      await editNotify(
+        order.telegramId,
+        progressMessageId,
+        renderProgress(
+          order,
+          "Lolos checker",
+          verifiedAfterRound,
+          totalAccounts,
+          unverifiedCount ? `Belum lolos: ${unverifiedCount}. Akan retry jika ronde masih ada.` : "Semua akun sudah lolos checker."
+        )
+      );
       if (verifiedAfterRound >= totalAccounts) break;
       if (verifiedAfterRound <= verifiedBeforeRound) {
-        log(`order #${order.id} no verified progress on round ${round}, stopping verify loop`);
-        break;
+        log(`order #${order.id} no verified progress on round ${round}, retrying remaining accounts if retry rounds are left`);
       }
     }
 
@@ -309,6 +393,17 @@ async function processOrder(order) {
       finishedAt: new Date().toISOString(),
     });
     log(`order #${order.id} DONE success=${successCount} failed=${failedCount} remaining=${remainingCount}`);
+    await editNotify(
+      order.telegramId,
+      progressMessageId,
+      renderProgress(
+        order,
+        "Selesai",
+        successCount,
+        totalAccounts,
+        remainingCount ? `Berhasil: ${successCount}. Gagal/belum lolos: ${remainingCount}.` : "Semua akun berhasil."
+      )
+    );
 
     usersStore.update((users) => {
       const user = users[order.telegramId];
