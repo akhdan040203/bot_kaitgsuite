@@ -1,0 +1,29 @@
+{
+  "name": "add-doku",
+  "version": "1.0.0",
+  "main": "app.js",
+  "scripts": {
+    "bot": "node telegram-bot.js",
+    "worker:psc": "node worker-psc.js",
+    "test": "node -e \"require('./lib/gsuite-format'); require('./services/orderkuota'); console.log('ok')\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@faker-js/faker": "^9.0.3",
+    "axios": "^1.7.7",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.7",
+    "imap": "^0.8.19",
+    "mailparser": "^3.7.3",
+    "mongoose": "^8.10.1",
+    "public-ip": "^7.0.1",
+    "puppeteer": "^23.4.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}

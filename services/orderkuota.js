@@ -1,0 +1,211 @@
+const axios = require("axios");
+const { getMutasiQris } = require("./orkut-mutasi");
+let mutasiCache = null;
+let mutasiCacheAt = 0;
+
+function crc16(payload) {
+  let crc = 0xffff;
+  for (let i = 0; i < payload.length; i++) {
+    crc ^= payload.charCodeAt(i) << 8;
+    for (let j = 0; j < 8; j++) {
+      crc = crc & 0x8000 ? (crc << 1) ^ 0x1021 : crc << 1;
+      crc &= 0xffff;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
+}
+
+function tag(id, value) {
+  const text = String(value);
+  return `${id}${text.length.toString().padStart(2, "0")}${text}`;
+}
+
+function parseTlv(payload) {
+  const tags = [];
+  let index = 0;
+
+  while (index + 4 <= payload.length) {
+    const id = payload.slice(index, index + 2);
+    const lengthText = payload.slice(index + 2, index + 4);
+    const length = Number(lengthText);
+    if (!/^\d{2}$/.test(id) || !/^\d{2}$/.test(lengthText) || !Number.isFinite(length)) {
+      throw new Error("Format TLV QRIS tidak valid");
+    }
+
+    const valueStart = index + 4;
+    const valueEnd = valueStart + length;
+    if (valueEnd > payload.length) {
+      throw new Error("Panjang tag QRIS tidak valid");
+    }
+
+    tags.push({ id, value: payload.slice(valueStart, valueEnd) });
+    index = valueEnd;
+  }
+
+  if (index !== payload.length) {
+    throw new Error("Payload QRIS memiliki sisa data tidak valid");
+  }
+
+  return tags;
+}
+
+function buildTlv(tags) {
+  return tags.map((item) => tag(item.id, item.value)).join("");
+}
+
+function generateDynamicQris(staticQris, amount) {
+  if (!staticQris) return "";
+
+  const qris = String(staticQris).trim();
+  if (!qris.startsWith("000201") || !qris.includes("5802ID")) {
+    throw new Error("QRCODE_TEXT tidak terlihat seperti payload QRIS valid");
+  }
+
+  const amountValue = String(Math.round(Number(amount)));
+  if (!amountValue || amountValue === "NaN") {
+    throw new Error("Nominal QRIS tidak valid");
+  }
+
+  const qrisWithoutCrcValue = qris.slice(0, -4);
+  const dynamicQris = qrisWithoutCrcValue.replace("010211", "010212");
+  const parts = dynamicQris.split("5802ID");
+  if (parts.length < 2) {
+    throw new Error("QRCODE_TEXT tidak memiliki tag negara QRIS 5802ID");
+  }
+
+  const amountTag = `54${(`0${amountValue.length}`).slice(-2)}${amountValue}5802ID`;
+  const withoutCrc = `${parts[0]}${amountTag}${parts.slice(1).join("5802ID")}`;
+  return `${withoutCrc}${crc16(withoutCrc)}`;
+}
+
+function readPath(obj, path) {
+  return String(path || "")
+    .split(".")
+    .filter(Boolean)
+    .reduce((value, key) => (value && value[key] !== undefined ? value[key] : undefined), obj);
+}
+
+function normalizeMutasiResponse(data) {
+  const rows =
+    readPath(data, "data") ||
+    readPath(data, "result") ||
+    readPath(data, "mutasi") ||
+    readPath(data, "transactions") ||
+    [];
+
+  const list = Array.isArray(rows) ? rows : [];
+  return list
+    .map((item) => {
+      const amount = item.amount || item.nominal || item.kredit || item.total || item.value;
+      const date = item.date || item.tanggal || item.created_at || item.datetime || item.waktu;
+      return {
+        amount: Number(String(amount || "").replace(/[^\d]/g, "")),
+        date: date ? String(date) : "",
+        raw: item,
+      };
+    })
+    .filter((item) => Number.isFinite(item.amount) && item.amount > 0);
+}
+
+async function getOrkutMutasi() {
+  const cacheTtl = Number(process.env.ORKUT_MUTASI_CACHE_MS || 5000);
+  if (mutasiCache && Date.now() - mutasiCacheAt < cacheTtl) return mutasiCache;
+
+  const username = process.env.USERNAME_ORKUT;
+  const token = process.env.AUTH_TOKEN;
+
+  if (!username || !token) {
+    return { status: false, data: [], error: "Missing USERNAME_ORKUT/AUTH_TOKEN" };
+  }
+
+  const response = await getMutasiQris({ username, authToken: token, type: "" });
+
+  mutasiCache = {
+    status: Boolean(response && response.status),
+    data: normalizeMutasiResponse(response),
+    raw: response,
+  };
+  mutasiCacheAt = Date.now();
+  return mutasiCache;
+}
+
+async function createQrisInvoice({ orderId, amount }) {
+  const url = process.env.ORDERKUOTA_CREATE_URL;
+  const token = process.env.ORDERKUOTA_API_TOKEN || process.env.APIKEY_ORKUT || process.env.ORKUT_KEY || process.env.AUTH_TOKEN;
+  const legacyQrisText =
+    process.env.CODE_TEXT ||
+    process.env.QRCODE_TEXT ||
+    process.env.QRIS_CODE_TEXT ||
+    process.env.ORDERKUOTA_CODE_TEXT;
+
+  if (!url && legacyQrisText) {
+    return {
+      provider: "orderkuota-qris-dynamic",
+      reference: `ORKUT-${orderId}`,
+      qrText: generateDynamicQris(legacyQrisText, amount),
+      raw: {
+        source: "CODE_TEXT",
+        merchantKeyConfigured: Boolean(process.env.MERCHANT_KEY),
+        orkutKeyConfigured: Boolean(process.env.ORKUT_KEY || process.env.APIKEY_ORKUT),
+        usernameConfigured: Boolean(process.env.USERNAME_ORKUT),
+        authTokenConfigured: Boolean(process.env.AUTH_TOKEN),
+      },
+    };
+  }
+
+  if (!url) {
+    return {
+      provider: "manual",
+      reference: `MANUAL-${orderId}`,
+      qrText: `Manual payment mode. Admin bisa pakai /paid ${orderId} setelah pembayaran diterima.`,
+      raw: null,
+    };
+  }
+
+  const payload = {
+    order_id: String(orderId),
+    amount,
+    note: `Kait PSC #${orderId}`,
+  };
+
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const { data } = await axios.post(url, payload, { headers, timeout: 30000 });
+
+  return {
+    provider: "orderkuota",
+    reference: readPath(data, process.env.ORDERKUOTA_REF_PATH || "data.reference") || String(orderId),
+    qrText: readPath(data, process.env.ORDERKUOTA_QRIS_PATH || "data.qris") || readPath(data, "qris") || "",
+    qrImage: readPath(data, process.env.ORDERKUOTA_QRIS_IMAGE_PATH || "data.qr_image") || "",
+    raw: data,
+  };
+}
+
+async function checkPaymentStatus(payment) {
+  const url = process.env.ORDERKUOTA_STATUS_URL;
+  const token = process.env.ORDERKUOTA_API_TOKEN || process.env.APIKEY_ORKUT || process.env.ORKUT_KEY || process.env.AUTH_TOKEN;
+
+  if (!url && payment.provider !== "manual") {
+    const response = await getOrkutMutasi();
+    if (!response.status) return "PENDING";
+
+    const targetAmount = Number(payment.amount);
+    const paid = response.data.some((item) => item.amount === targetAmount);
+    return paid ? "PAID" : "PENDING";
+  }
+
+  if (!url || payment.provider === "manual") return "PENDING";
+
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const { data } = await axios.get(url, {
+    headers,
+    params: { reference: payment.reference, order_id: payment.orderId },
+    timeout: 30000,
+  });
+
+  const status = String(readPath(data, process.env.ORDERKUOTA_STATUS_PATH || "data.status") || "").toUpperCase();
+  if (["PAID", "SUCCESS", "SETTLED", "LUNAS"].includes(status)) return "PAID";
+  if (["EXPIRED", "CANCELLED", "CANCELED"].includes(status)) return "EXPIRED";
+  return "PENDING";
+}
+
+module.exports = { createQrisInvoice, checkPaymentStatus, getOrkutMutasi };
