@@ -236,6 +236,7 @@ async function processOrder(order) {
     const maxRetryRounds = Math.max(1, Number(process.env.PSC_VERIFY_MAX_ROUNDS || 3));
     const remainingInputFile = path.join(order.orderPath, "input.txt");
     const originalInputFile = path.join(order.orderPath, "original-input.txt");
+    const notRegisteredFile = path.join(order.orderPath, "not-registered.txt");
     let resultFile = path.join(order.orderPath, "success.txt");
     let logFile = path.join(order.orderPath, "worker.log");
 
@@ -284,7 +285,10 @@ async function processOrder(order) {
 
     for (let round = 1; round <= maxRetryRounds; round++) {
       const successBeforeRound = countLines(resultFile);
-      const accountsToLink = subtractLines(originalAccounts, readLines(resultFile));
+      const accountsToLink = subtractLines(originalAccounts, [
+        ...readLines(resultFile),
+        ...readLines(notRegisteredFile),
+      ]);
 
       if (accountsToLink.length === 0) break;
 
@@ -378,9 +382,11 @@ async function processOrder(order) {
     }
 
     const successCount = countLines(resultFile);
-    const remainingUnverified = subtractLines(originalAccounts, readLines(resultFile));
+    const notRegistered = readLines(notRegisteredFile);
+    const notRegisteredCount = notRegistered.length;
+    const remainingUnverified = subtractLines(originalAccounts, [...readLines(resultFile), ...notRegistered]);
     const remainingCount = remainingUnverified.length;
-    const failedCount = remainingCount;
+    const failedCount = remainingCount + notRegisteredCount;
     const remainingUnverifiedFile = path.join(order.orderPath, "remaining-unverified.txt");
     writeLines(remainingUnverifiedFile, remainingUnverified);
 
@@ -450,12 +456,16 @@ async function processOrder(order) {
         `Order #${order.id} selesai.`,
         "",
         `Total: ${order.totalAccounts}`,
-      `Berhasil: ${successCount}`,
-      `Gagal/belum berhasil: ${remainingCount}`,
-    ].join("\n")
+        `Berhasil: ${successCount}`,
+        notRegisteredCount ? `Gsuite tidak terdaftar: ${notRegisteredCount}` : "",
+        `Gagal/belum berhasil: ${remainingCount}`,
+      ].filter(Boolean).join("\n")
     );
     if (successCount > 0) {
       await sendDocument(order.telegramId, resultFile, `Hasil akun berhasil ngait order #${order.id}`);
+    }
+    if (notRegisteredCount > 0) {
+      await sendDocument(order.telegramId, notRegisteredFile, `Gsuite tidak terdaftar order #${order.id}`);
     }
     if (remainingCount > 0) {
       await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
@@ -478,6 +488,19 @@ async function processOrder(order) {
 async function loop() {
   await connectMongo();
   log("MongoDB connected.");
+  // Recovery: order yang nyangkut RUNNING (worker mati di tengah proses) -> balikin ke QUEUED
+  // biar diproses ulang & akhirnya DONE (hilang dari antrian). Akun yang sudah sukses tetap di-skip.
+  let resetCount = 0;
+  await ordersStore.update((orders) =>
+    orders.map((o) => {
+      if (o.status === "RUNNING") {
+        resetCount++;
+        return { ...o, status: "QUEUED" };
+      }
+      return o;
+    })
+  );
+  if (resetCount > 0) log(`recovery: ${resetCount} order RUNNING di-reset ke QUEUED`);
   log("PSC worker started.");
   while (true) {
     const orders = await ordersStore.read();

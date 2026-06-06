@@ -358,12 +358,34 @@ class EmulatorAutomator:
                 return False
             self.dismiss_crash_dialogs()
 
-            # Tunggu layar password BENAR-BENAR muncul sebelum ketik, biar password
-            # tidak salah masuk ke field email yang masih transisi.
-            self.log_info("Menunggu layar password siap...")
-            self.device(
-                textMatches="(?i)Enter your password|Show password|Masukkan sandi|Lihat sandi"
-            ).exists(timeout=action_timeout(8))
+            # Tunggu salah satu: layar password muncul ATAU error "email tidak terdaftar".
+            # Kalau tidak terdaftar -> skip cepat (tidak buang waktu proses penuh).
+            self.log_info("Menunggu layar password / cek email terdaftar...")
+            not_found_markers = [
+                "Couldn't find your Google Account",
+                "find your Google Account",
+                "Tidak dapat menemukan Akun Google",
+                "menemukan Akun Google",
+                "Enter a valid email",
+                "Masukkan email yang valid",
+            ]
+            pwd_markers = "(?i)Enter your password|Show password|Masukkan sandi|Lihat sandi"
+            deadline = time.time() + action_timeout(8)
+            while time.time() < deadline:
+                hit = None
+                for marker in not_found_markers:
+                    try:
+                        if self.device(textContains=marker).exists(timeout=0):
+                            hit = marker
+                            break
+                    except Exception:
+                        continue
+                if hit:
+                    self.log_warn(f"Email tidak terdaftar ({hit}): {email}")
+                    return "NOT_REGISTERED"
+                if self.device(textMatches=pwd_markers).exists(timeout=0):
+                    break
+                pause(0.4)
 
             self.log_info("Input Google password")
             pwd_field = self.device(className="android.widget.EditText")
@@ -576,7 +598,18 @@ class EmulatorAutomator:
             self.log_info(f"Email: {email}, Paysafecard: {psc_email}")
             self.emit_progress(email, 5, "mulai proses")
             
-            if not self.login_google(email, password):
+            login_result = self.login_google(email, password)
+            if login_result == "NOT_REGISTERED":
+                self.log_warn(f"Gsuite tidak terdaftar, skip tanpa proses penuh: {email}")
+                self.save_not_registered(email, password)
+                try:
+                    self.device.press("back")
+                    pause(0.3)
+                    self.device.press("back")
+                except Exception:
+                    pass
+                return "NOT_REGISTERED"
+            if not login_result:
                 self.log_error(f"Google login/register failed for {email}")
                 return False
             self.emit_progress(email, 20, "login google berhasil")
@@ -752,6 +785,17 @@ class EmulatorAutomator:
             except Exception as e:
                 self.log_error(f"Error saving successful account {email}: {e}")
 
+    def save_not_registered(self, email, password):
+        """Catat akun gsuite yang tidak terdaftar (email tidak ditemukan) ke file terpisah."""
+        try:
+            target = os.path.join(os.path.dirname(RESULT_FILE) or ".", "not-registered.txt")
+            with self.result_file_lock:
+                with open(target, "a") as f:
+                    f.write(f"{email}|{password}\n")
+            self.log_warn(f"Dicatat sebagai tidak terdaftar: {email}")
+        except Exception as e:
+            self.log_error(f"Gagal catat not-registered {email}: {e}")
+
     def click_connect_button(self):
         # 1. Cari tombol dengan text "Connect" (case-insensitive)
         if self.device(textMatches="(?i)connect").exists(timeout=0):
@@ -907,8 +951,12 @@ def fast_process_emulator(automator):
             email, password = email_data.split("|")
             processed_count += 1
             # Use configured PaysafeCard credential.
-            success = automator.fast_process_account(email, password, PSC_EMAIL, PSC_PASS)
-            if success:
+            result = automator.fast_process_account(email, password, PSC_EMAIL, PSC_PASS)
+            if result == "NOT_REGISTERED":
+                # Tidak terdaftar -> skip permanen, hapus dari input biar tidak di-retry.
+                remove_processed_account(email)
+                automator.log_info(f"SKIP (tidak terdaftar): {email}")
+            elif result:
                 success_count += 1
                 remove_processed_account(email)
                 automator.log_info(f"SUCCESS: {success_count}/{processed_count} accounts processed successfully")

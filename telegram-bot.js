@@ -175,6 +175,10 @@ function formatDuration(ms) {
 
 function formatTelegramSupport(value) {
   const raw = String(value || "@admin").trim();
+  // ID numerik Telegram -> link buka profil via tg://user?id=
+  if (/^\d+$/.test(raw)) {
+    return `<a href="tg://user?id=${raw}">Admin</a>`;
+  }
   const username = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "");
   if (!username) return "@admin";
   return `<a href="https://t.me/${username}">@${username}</a>`;
@@ -889,6 +893,7 @@ async function handleAdminCommand(chatId, text) {
         "",
         `/setharga ${settings.pricePerAccount}`,
         `/setmin ${settings.minAccounts}`,
+        `/setsupport @username`,
         "/settier 20:210 100:200 600:190",
         "/voucher  (kelola voucher diskon)",
         "/orders",
@@ -988,6 +993,18 @@ async function handleAdminCommand(chatId, text) {
     }
     await settingsStore.update((settings) => ({ ...settings, minAccounts }));
     await sendMessage(chatId, `Minimal order diubah menjadi ${minAccounts} akun.`);
+    return true;
+  }
+
+  if (command === "/setsupport") {
+    const value = (args[0] || "").trim();
+    if (!value) {
+      await sendMessage(chatId, "Format: /setsupport @username  (atau ID Telegram). Username lebih disarankan biar link bisa diklik.");
+      return true;
+    }
+    const clean = value.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "");
+    await settingsStore.update((settings) => ({ ...settings, support: clean }));
+    await sendMessage(chatId, `Support diubah ke: ${formatTelegramSupport(clean)}`);
     return true;
   }
 
