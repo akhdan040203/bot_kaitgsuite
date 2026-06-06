@@ -18,9 +18,9 @@ def env_float(name, default):
     except (TypeError, ValueError):
         return float(default)
 
-U2_WAIT_TIMEOUT = env_float("U2_WAIT_TIMEOUT", 20)
-ACTION_TIMEOUT_MULTIPLIER = env_float("U2_ACTION_TIMEOUT_MULTIPLIER", 2)
-SLEEP_MULTIPLIER = env_float("U2_SLEEP_MULTIPLIER", 1.5)
+U2_WAIT_TIMEOUT = env_float("U2_WAIT_TIMEOUT", 10)
+ACTION_TIMEOUT_MULTIPLIER = env_float("U2_ACTION_TIMEOUT_MULTIPLIER", 1)
+SLEEP_MULTIPLIER = env_float("U2_SLEEP_MULTIPLIER", 1)
 
 def action_timeout(seconds):
     return max(1, int(round(float(seconds) * ACTION_TIMEOUT_MULTIPLIER)))
@@ -40,15 +40,21 @@ class EmulatorAutomator:
         
     def log_info(self, message):
         safe_message = str(message).encode("ascii", "replace").decode("ascii")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] INFO: {safe_message}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] INFO: {safe_message}", flush=True)
 
     def log_warn(self, message):
         safe_message = str(message).encode("ascii", "replace").decode("ascii")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] WARNING: {safe_message}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] WARNING: {safe_message}", flush=True)
 
     def log_error(self, message):
         safe_message = str(message).encode("ascii", "replace").decode("ascii")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] ERROR: {safe_message}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [{self.name}] ERROR: {safe_message}", flush=True)
+
+    def emit_progress(self, email, percent, label):
+        safe_email = str(email).replace("|", " ").strip()
+        safe_label = str(label).replace("|", " ").strip()
+        safe_label = safe_label.encode("ascii", "replace").decode("ascii")
+        print(f"PSC_PROGRESS|{safe_email}|{int(percent)}|{safe_label}", flush=True)
 
     def connect(self):
         try:
@@ -65,9 +71,52 @@ class EmulatorAutomator:
     def fast_click_text(self, text_list, timeout=3):
         """Text clicking with configurable timeout for slower RDP/emulator sessions"""
         for text in text_list:
+            selector = self.device(textMatches="(?i)" + text)
+            try:
+                if selector.exists(timeout=0):
+                    selector.click()
+                    self.log_info(f"Clicked immediately by text: {text}")
+                    return True
+            except Exception:
+                pass
+        for text in text_list:
+            self.log_info(f"Waiting/clicking text: {text}, timeout={action_timeout(timeout)}s")
             if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(timeout)):
+                self.log_info(f"Clicked by text after wait: {text}")
                 return True
         return False
+
+    def set_text_fast(self, value, timeout=5, **selector_kwargs):
+        selector = self.device(**selector_kwargs)
+        self.log_info(f"Trying set_text immediate: {selector_kwargs}")
+        try:
+            if selector.exists(timeout=0):
+                selector.set_text(value)
+                self.log_info(f"set_text immediate success: {selector_kwargs}")
+                return True
+        except Exception:
+            pass
+
+        self.log_info(f"Waiting input for set_text: {selector_kwargs}, timeout={action_timeout(timeout)}s")
+        if selector.exists(timeout=action_timeout(timeout)):
+            selector.set_text(value)
+            self.log_info(f"set_text success after wait: {selector_kwargs}")
+            return True
+        self.log_warn(f"set_text target not found: {selector_kwargs}")
+        return False
+
+    def exists_fast(self, timeout=3, **selector_kwargs):
+        selector = self.device(**selector_kwargs)
+        try:
+            if selector.exists(timeout=0):
+                self.log_info(f"exists immediate true: {selector_kwargs}")
+                return True
+        except Exception:
+            pass
+        self.log_info(f"Waiting exists: {selector_kwargs}, timeout={action_timeout(timeout)}s")
+        exists = selector.exists(timeout=action_timeout(timeout))
+        self.log_info(f"exists result {exists}: {selector_kwargs}")
+        return exists
 
     def dismiss_crash_dialogs(self):
         """Close common Android/Google crash dialogs without changing the main flow."""
@@ -110,13 +159,26 @@ class EmulatorAutomator:
             self.log_error(f"Failed reading dumpsys account: {e}")
             return ""
 
+    def _google_account_emails_dumpsys(self):
+        out = self._dumpsys_account_output()
+        emails = []
+        patterns = [
+            r"Account\s*\{\s*name=([^,\}]+),\s*type=com\.google\s*\}",
+            r"name=([^,\}\s]+),\s*type=com\.google",
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, out, flags=re.IGNORECASE):
+                email = match.strip().lower()
+                if "@" in email and email not in emails:
+                    emails.append(email)
+        return emails
+
     def _has_google_account_dumpsys(self):
-        out = self._dumpsys_account_output().lower()
-        return "type=com.google" in out or "com.google" in out
+        return len(self._google_account_emails_dumpsys()) > 0
 
     def _verify_google_account_dumpsys(self, email):
-        out = self._dumpsys_account_output().lower()
-        detected = email.strip().lower() in out and "com.google" in out
+        expected = email.strip().lower()
+        detected = expected in self._google_account_emails_dumpsys()
         if detected:
             self.log_info(f"Account terdeteksi di dumpsys: {email}")
         return detected
@@ -124,8 +186,19 @@ class EmulatorAutomator:
     def click_candidates(self, resource_ids=None, texts=None, timeout=3):
         resource_ids = resource_ids or []
         texts = texts or []
+        self.log_info(f"click_candidates start resource_ids={resource_ids} texts={texts} timeout={action_timeout(timeout)}s")
 
         if texts:
+            for resource_id in resource_ids:
+                for text in texts:
+                    try:
+                        selector = self.device(resourceId=resource_id, textMatches="(?i)" + text)
+                        if selector.exists(timeout=0):
+                            selector.click()
+                            self.log_info(f"Clicked immediately by resource-id/text: {resource_id} / {text}")
+                            return True
+                    except Exception:
+                        continue
             for resource_id in resource_ids:
                 for text in texts:
                     try:
@@ -137,12 +210,30 @@ class EmulatorAutomator:
         else:
             for resource_id in resource_ids:
                 try:
+                    selector = self.device(resourceId=resource_id)
+                    if selector.exists(timeout=0):
+                        selector.click()
+                        self.log_info(f"Clicked immediately by resource-id: {resource_id}")
+                        return True
+                except Exception:
+                    continue
+            for resource_id in resource_ids:
+                try:
                     if self.device(resourceId=resource_id).click_exists(timeout=action_timeout(timeout)):
                         self.log_info(f"Clicked by resource-id: {resource_id}")
                         return True
                 except Exception:
                     continue
 
+        for text in texts:
+            try:
+                selector = self.device(textMatches="(?i)" + text)
+                if selector.exists(timeout=0):
+                    selector.click()
+                    self.log_info(f"Clicked immediately by text: {text}")
+                    return True
+            except Exception:
+                continue
         for text in texts:
             try:
                 if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(timeout)):
@@ -153,6 +244,86 @@ class EmulatorAutomator:
 
         return False
 
+    def click_google_next(self, step_name="Next"):
+        self.log_info(f"{step_name}: trying Google NEXT button selectors")
+        try:
+            self.device.press("enter")
+            pause(0.3)
+            self.log_info(f"{step_name}: pressed ENTER as first quick action")
+        except Exception as e:
+            self.log_warn(f"{step_name}: ENTER press failed: {e}")
+
+        if self.click_candidates(
+            resource_ids=[
+                "identifierNext",
+                "passwordNext",
+                "com.google.android.gms:id/identifierNext",
+                "com.google.android.gms:id/passwordNext",
+                "com.google.android.gms:id/next_button",
+                "com.google.android.gms:id/suw_navbar_next",
+            ],
+            texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
+            timeout=2,
+        ):
+            self.log_info(f"{step_name}: NEXT clicked by selector")
+            return True
+
+        self.log_warn(f"{step_name}: selector failed, trying visible button fallback")
+        try:
+            buttons = self.device(className="android.widget.Button")
+            if hasattr(buttons, "count") and buttons.count > 0:
+                self.log_info(f"{step_name}: found {buttons.count} android.widget.Button elements")
+                for i in range(buttons.count):
+                    btn = self.device(className="android.widget.Button", instance=i)
+                    info = btn.info or {}
+                    text = str(info.get("text", "")).lower()
+                    desc = str(info.get("contentDescription", "")).lower()
+                    bounds = info.get("bounds", {})
+                    self.log_info(f"{step_name}: button[{i}] text='{text}' desc='{desc}' bounds={bounds}")
+                    if "next" in text or "berikut" in text or "next" in desc or "berikut" in desc:
+                        if bounds:
+                            x = int((bounds["left"] + bounds["right"]) / 2)
+                            y = int((bounds["top"] + bounds["bottom"]) / 2)
+                            self.device.click(x, y)
+                        else:
+                            btn.click()
+                        self.log_info(f"{step_name}: NEXT clicked by button instance {i}")
+                        return True
+        except Exception as e:
+            self.log_warn(f"{step_name}: button fallback failed: {e}")
+
+        try:
+            hierarchy = self.device.dump_hierarchy(compressed=True) or ""
+            lower_hierarchy = hierarchy.lower()
+            self.log_info(
+                f"{step_name}: hierarchy has next={('next' in lower_hierarchy)} "
+                f"berikut={('berikut' in lower_hierarchy)} length={len(hierarchy)}"
+            )
+        except Exception as e:
+            self.log_warn(f"{step_name}: dump hierarchy failed: {e}")
+
+        try:
+            w, h = self.device.window_size()
+            taps = [
+                (int(w * 0.82), int(h * 0.94)),
+                (int(w * 0.86), int(h * 0.94)),
+                (int(w * 0.84), int(h * 0.90)),
+            ]
+            for x, y in taps:
+                self.log_warn(f"{step_name}: fallback tap coordinate x={x} y={y}")
+                self.device.click(x, y)
+                pause(0.4)
+                try:
+                    self.device.shell(f"input tap {x} {y}")
+                    self.log_warn(f"{step_name}: adb input tap coordinate x={x} y={y}")
+                    pause(0.4)
+                except Exception as shell_error:
+                    self.log_warn(f"{step_name}: adb input tap failed: {shell_error}")
+            return True
+        except Exception as e:
+            self.log_error(f"{step_name}: coordinate fallback failed: {e}")
+            return False
+
     def login_google(self, email, password):
         try:
             self.log_info("Opening Accounts page via SYNC_SETTINGS shortcut intent")
@@ -160,8 +331,13 @@ class EmulatorAutomator:
             pause(2)
             self.dismiss_crash_dialogs()
 
-            if self._has_google_account_dumpsys():
-                self.log_warn("Google account existing detected in dumpsys. Stop login to avoid duplicate account.")
+            existing_google_accounts = self._google_account_emails_dumpsys()
+            if existing_google_accounts:
+                self.log_warn(
+                    "Google account existing detected in dumpsys: "
+                    + ", ".join(existing_google_accounts)
+                    + ". Stop login to avoid duplicate account."
+                )
                 return False
 
             self.log_info("No existing Google account detected, continuing Add account flow")
@@ -188,24 +364,24 @@ class EmulatorAutomator:
             self.dismiss_crash_dialogs()
 
             self.log_info(f"Input Google email: {email}")
-            self.device(className="android.widget.EditText").set_text(email)
+            if not self.set_text_fast(email, timeout=5, className="android.widget.EditText"):
+                self.log_error("Cannot find Google email input")
+                return False
             pause(0.5)
-            self.click_candidates(
-                resource_ids=["identifierNext", "com.google.android.gms:id/identifierNext"],
-                texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
-                timeout=5,
-            )
+            if not self.click_google_next("Email step"):
+                self.log_error("Cannot click NEXT after email input")
+                return False
             pause(2)
             self.dismiss_crash_dialogs()
 
             self.log_info("Input Google password")
-            self.device(className="android.widget.EditText").set_text(password)
+            if not self.set_text_fast(password, timeout=5, className="android.widget.EditText"):
+                self.log_error("Cannot find Google password input")
+                return False
             pause(1)
-            self.click_candidates(
-                resource_ids=["passwordNext", "com.google.android.gms:id/passwordNext"],
-                texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
-                timeout=5,
-            )
+            if not self.click_google_next("Password step"):
+                self.log_error("Cannot click NEXT after password input")
+                return False
             pause(3)
             self.dismiss_crash_dialogs()
 
@@ -220,6 +396,10 @@ class EmulatorAutomator:
             ]
 
             for _ in range(8):
+                if self._verify_google_account_dumpsys(email):
+                    self.log_info("Account already registered during confirmation screen, continue to Play Store")
+                    return True
+
                 clicked = self.click_candidates(
                     resource_ids=[
                         "com.google.android.gms:id/next_button",
@@ -233,6 +413,10 @@ class EmulatorAutomator:
                 if not clicked:
                     break
                 pause(1)
+
+                if self._verify_google_account_dumpsys(email):
+                    self.log_info("Account registered after confirmation click, continue to Play Store")
+                    return True
 
             if self._verify_google_account_dumpsys(email):
                 return True
@@ -252,7 +436,7 @@ class EmulatorAutomator:
 
     def has_paysafecard_payment_method(self, timeout=8):
         try:
-            detected = self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=action_timeout(timeout))
+            detected = self.exists_fast(timeout=timeout, textMatches="(?i)^paysafecard[:：].*")
             if detected:
                 self.log_info("PaysafeCard payment method detected on Play Store Payment methods page")
             return detected
@@ -346,15 +530,18 @@ class EmulatorAutomator:
         try:
             self.log_info(f"====== STARTING NEW ACCOUNT PROCESS ======")
             self.log_info(f"Email: {email}, Paysafecard: {psc_email}")
+            self.emit_progress(email, 5, "mulai proses")
             
             if not self.login_google(email, password):
                 self.log_error(f"Google login/register failed for {email}")
                 return False
+            self.emit_progress(email, 20, "login google berhasil")
 
             # Quick Play Store launch
             self.device.press("home")
             self.device.app_start("com.android.vending")
             pause(5)
+            self.emit_progress(email, 30, "buka play store")
 
             # Fast popup handling
             self.fast_handle_popups()
@@ -362,8 +549,9 @@ class EmulatorAutomator:
             # Optimized account clicking with multiple strategies
             account_clicked = False
             click_strategies = [
+                lambda: self.click_candidates(resource_ids=["com.android.vending:id/account_menu_item"], timeout=2),
+                lambda: self.click_candidates(texts=["Account"], timeout=2),
                 lambda: self.device(descriptionContains="Account").click_exists(timeout=action_timeout(2)),
-                lambda: self.device(resourceId="com.android.vending:id/account_menu_item").click_exists(timeout=action_timeout(2)),
                 lambda: (self.device.click(450, 100), True)[1]  # Coordinate fallback
             ]
             
@@ -381,6 +569,7 @@ class EmulatorAutomator:
                     pause(1)
 
             pause(2)
+            self.emit_progress(email, 40, "buka menu akun play store")
 
             # Fast navigation to payment methods
             payment_menus = [
@@ -389,14 +578,15 @@ class EmulatorAutomator:
             ]
             
             for en_text, id_text in payment_menus:
-                if not (self.device(text=en_text).click_exists(timeout=action_timeout(2)) or 
-                       self.device(text=id_text).click_exists(timeout=action_timeout(2))):
+                if not self.click_candidates(texts=[en_text, id_text], timeout=2):
                     self.log_warn(f"Could not find {en_text}")
                 pause(2)
+            self.emit_progress(email, 50, "buka payment methods")
 
             # Check if DOKU already exists
             if self.has_paysafecard_payment_method(timeout=3):
                 self.log_info(f"✅ DOKU already exists on account {email}")
+                self.emit_progress(email, 100, "paysafecard sudah ada")
                 
                 # Save successful account (DOKU sudah ada)
                 self.save_successful_account_safe(email, password)
@@ -410,38 +600,47 @@ class EmulatorAutomator:
                     return False
             
             # Fast DOKU addition
-            if not self.device(text="Add PaysafeCard").click_exists(timeout=action_timeout(8)):
+            if not self.click_candidates(texts=["Add PaysafeCard"], timeout=8):
                 self.log_error("Add PaysafeCard button not found")
                 self.fast_remove_google_account(email)
                 return False
                 
             self.log_info("Add PaysafeCard button found and clicked")
+            self.emit_progress(email, 60, "klik add paysafecard")
             pause(1)
 
             self.fast_click_text(["Continue", "CONTINUE", "Lanjutkan", "LANJUTKAN"])
             pause(1)
             
             # Input Paysafecard account used for connecting in Play Store.
-            self.device(className="android.widget.EditText", instance=0).set_text(psc_email)
-            self.device(className="android.widget.EditText", instance=1).set_text(psc_pass)
+            if not self.set_text_fast(psc_email, timeout=5, className="android.widget.EditText", instance=0):
+                self.log_error("Cannot find PaysafeCard email input")
+                self.fast_remove_google_account(email)
+                return False
+            if not self.set_text_fast(psc_pass, timeout=5, className="android.widget.EditText", instance=1):
+                self.log_error("Cannot find PaysafeCard password input")
+                self.fast_remove_google_account(email)
+                return False
+            self.emit_progress(email, 70, "isi akun paysafecard")
             pause(5)
-            if self.device(text="Connect").exists(timeout=action_timeout(2)):
+            if self.exists_fast(timeout=2, text="Connect"):
                 self.log_info("Connect button detected")
             pause(2)
             self.click_connect_button()
+            self.emit_progress(email, 80, "klik connect")
             self.handle_connect_error_and_retry(max_retry=int(os.getenv("PSC_CONNECT_RETRY", "5")))
             pause(2)
             pause(2)
 
             # Wait for DOKU e-Wallet process
-            if self.device(text="PaysafeCard").exists(timeout=action_timeout(3)):
+            if self.exists_fast(timeout=3, text="PaysafeCard"):
                 self.device(text="PaysafeCard").wait_gone(timeout=action_timeout(3))
 
             # Fast complete sign up
-            if self.device(text="Complete sign up").exists(timeout=action_timeout(5)):
+            if self.exists_fast(timeout=5, text="Complete sign up"):
                 self.device(text="Full name").click()
                 pause(0.5)
-                self.device(text="Full name").set_text("indonesian")
+                self.set_text_fast("indonesian", timeout=3, text="Full name")
                 self.fast_click_text(["Save", "SAVE", "Simpan", "SIMPAN"])
                 pause(3)
 
@@ -450,6 +649,7 @@ class EmulatorAutomator:
             # Quick success verification - PENTING: Hanya save jika benar-benar berhasil
             if self.has_paysafecard_payment_method(timeout=8):
                 self.log_info(f"✅ PaysafeCard successfully added to account {email}")
+                self.emit_progress(email, 100, "berhasil validasi play store")
                 
                 # HANYA save ke file hasil jika DOKU benar-benar berhasil ditambahkan
                 self.save_successful_account_safe(email, password)
@@ -497,6 +697,11 @@ class EmulatorAutomator:
 
     def click_connect_button(self):
         # 1. Cari tombol dengan text "Connect" (case-insensitive)
+        if self.device(textMatches="(?i)connect").exists(timeout=0):
+            self.device(textMatches="(?i)connect").click()
+            self.log_info("Clicked Connect immediately by text")
+            return True
+
         if self.device(textMatches="(?i)connect").exists(timeout=action_timeout(1)):
             self.device(textMatches="(?i)connect").click()
             self.log_info("Clicked Connect by text")
@@ -538,11 +743,15 @@ class EmulatorAutomator:
         while retry < max_retry:
             pause(2)
             # Deteksi popup error
-            if self.device(text="We ran into a problem").exists(timeout=action_timeout(2)):
+            if self.exists_fast(timeout=2, text="We ran into a problem"):
                 self.log_warn("Detected error popup after Connect, will close and retry...")
                 # Klik tombol X (close)
-                if self.device(description="Close").exists(timeout=action_timeout(1)):
+                if self.device(description="Close").exists(timeout=0):
                     self.device(description="Close").click()
+                elif self.device(description="Close").exists(timeout=action_timeout(1)):
+                    self.device(description="Close").click()
+                elif self.device(text="×").exists(timeout=0):
+                    self.device(text="×").click()
                 elif self.device(text="×").exists(timeout=action_timeout(1)):
                     self.device(text="×").click()
                 else:

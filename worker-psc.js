@@ -54,6 +54,17 @@ async function editNotify(chatId, messageId, text) {
   }
 }
 
+async function deleteNotify(chatId, messageId) {
+  if (!API || !chatId || !messageId) return;
+  try {
+    await axios.post(
+      `${API}/deleteMessage`,
+      { chat_id: chatId, message_id: messageId },
+      { timeout: 30000 }
+    );
+  } catch (_) {}
+}
+
 async function sendDocument(chatId, filePath, caption) {
   if (!API || !chatId || !fs.existsSync(filePath)) return;
   const FormData = require("form-data");
@@ -121,17 +132,26 @@ function progressBar(done, total) {
   return `[${"█".repeat(filled)}${"░".repeat(10 - filled)}] ${percent}%`;
 }
 
+function progressBarAscii(done, total) {
+  const safeTotal = Math.max(1, Number(total || 0));
+  const safeDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  const percent = Math.floor((safeDone / safeTotal) * 100);
+  const filled = Math.floor(percent / 10);
+  return `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] ${percent}%`;
+}
+
 function renderProgress(order, phase, done, total, detail = "") {
+  const displayDone = Number.isInteger(done) ? done : Number(done || 0).toFixed(1);
   return [
     `<b>Progress Order #${order.id}</b>`,
     "",
-    progressBar(done, total),
-    `${phase}: ${done}/${total}`,
+    progressBarAscii(done, total),
+    `${phase}: ${displayDone}/${total}`,
     detail,
   ].filter(Boolean).join("\n");
 }
 
-function runPscWorker(order, attempt) {
+function runPscWorker(order, attempt, onProgress) {
   return new Promise((resolve, reject) => {
     const inputFile = path.join(order.orderPath, "input.txt");
     const resultFile = path.join(order.orderPath, "success.txt");
@@ -152,10 +172,28 @@ function runPscWorker(order, attempt) {
 
     log(`attempt ${attempt}: spawning: ${PYTHON_BIN} ${args.join(" ")}`);
     const child = spawn(PYTHON_BIN, args, { cwd: __dirname, windowsHide: true });
+    let stdoutBuffer = "";
+
+    function handleProgressChunk(chunk) {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const match = line.match(/^PSC_PROGRESS\|([^|]+)\|(\d+)\|(.+)$/);
+        if (!match || typeof onProgress !== "function") continue;
+        onProgress({
+          email: match[1].trim().toLowerCase(),
+          percent: Math.max(0, Math.min(100, Number(match[2]))),
+          label: match[3].trim(),
+        });
+      }
+    }
 
     child.stdout.on("data", (chunk) => {
       fs.appendFileSync(logFile, chunk);
       process.stdout.write(chunk);
+      handleProgressChunk(chunk);
     });
     child.stderr.on("data", (chunk) => {
       fs.appendFileSync(logFile, chunk);
@@ -200,6 +238,42 @@ async function processOrder(order) {
 
     const originalAccounts = readLines(originalInputFile);
     const totalAccounts = originalAccounts.length || Number(order.totalAccounts || 0);
+    const accountProgress = new Map();
+    let nextProgressPercent = 20;
+
+    const updateRealtimeProgress = async ({ email, percent, label }) => {
+      accountProgress.set(email, percent);
+      const successEmails = new Set(readLines(resultFile).map((line) => line.split("|")[0].trim().toLowerCase()));
+      let progressSum = 0;
+
+      for (const account of originalAccounts) {
+        const accountEmail = account.split("|")[0].trim().toLowerCase();
+        if (successEmails.has(accountEmail)) {
+          progressSum += 100;
+        } else {
+          progressSum += Number(accountProgress.get(accountEmail) || 0);
+        }
+      }
+
+      const overallPercent = Math.floor(progressSum / Math.max(1, totalAccounts));
+      if (overallPercent < nextProgressPercent && percent < 100) return;
+
+      const displayPercent = Math.min(100, Math.max(nextProgressPercent, overallPercent));
+      const doneEquivalent = (displayPercent / 100) * totalAccounts;
+      while (nextProgressPercent <= displayPercent) nextProgressPercent += 20;
+
+      await editNotify(
+        order.telegramId,
+        progressMessageId,
+        renderProgress(
+          order,
+          "Ngait akun",
+          doneEquivalent,
+          totalAccounts,
+          `${displayPercent}% - ${label || "proses"}`
+        )
+      );
+    };
 
     for (let round = 1; round <= maxRetryRounds; round++) {
       const successBeforeRound = countLines(resultFile);
@@ -232,7 +306,11 @@ async function processOrder(order) {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (lastRemainingCount === 0) break;
 
-        ({ resultFile, logFile } = await runPscWorker(order, `${round}.${attempt}`));
+        ({ resultFile, logFile } = await runPscWorker(order, `${round}.${attempt}`, (progress) => {
+          updateRealtimeProgress(progress).catch((error) => {
+            console.error(`[progress] ${error.message}`);
+          });
+        }));
 
         const successCountAfterAttempt = countLines(resultFile);
         const remainingCountAfterAttempt = countLines(remainingInputFile);
@@ -348,6 +426,10 @@ async function processOrder(order) {
     }
     if (remainingCount > 0) {
       await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
+    }
+    await deleteNotify(order.telegramId, progressMessageId);
+    if (order.queueMessageId) {
+      await deleteNotify(order.telegramId, order.queueMessageId);
     }
   } catch (error) {
     log(`order #${order.id} FAILED ${error.message}`);

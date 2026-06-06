@@ -30,7 +30,7 @@ const usersStore = new JsonStore(path.join(DATA_DIR, "users.json"), {});
 const ordersStore = new JsonStore(path.join(DATA_DIR, "orders.json"), []);
 const settingsStore = new JsonStore(path.join(DATA_DIR, "settings.json"), {
   pricePerAccount: Number(process.env.DEFAULT_PRICE_PER_ACCOUNT || 2000),
-  minAccounts: Number(process.env.MIN_KAIT_ACCOUNTS || 10),
+  minAccounts: Number(process.env.MIN_KAIT_ACCOUNTS || 1),
   support: process.env.SUPPORT_USERNAME || "@admin",
   uniquePaymentCode: process.env.UNIQUE_PAYMENT_CODE !== "false",
   uniquePaymentCodeMin: Number(process.env.UNIQUE_PAYMENT_CODE_MIN || 500),
@@ -150,6 +150,13 @@ async function sendMessage(chatId, text, extra = {}) {
     disable_web_page_preview: true,
     ...extra,
   });
+}
+
+async function deleteMessage(chatId, messageId) {
+  if (!chatId || !messageId) return;
+  try {
+    await tg("deleteMessage", { chat_id: chatId, message_id: messageId });
+  } catch (_) {}
 }
 
 async function sendPhoto(chatId, photo, caption, extra = {}) {
@@ -318,7 +325,7 @@ async function handleParsedKait(chatId, parsed) {
   }
 
   sessions.set(String(chatId), { mode: "confirm_kait", parsed });
-  await sendMessage(chatId, buildOrderSummary(parsed, settings), {
+  const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings), {
     reply_markup: {
       inline_keyboard: [
         [{ text: "Buat QRIS", callback_data: "confirm_kait" }],
@@ -326,9 +333,10 @@ async function handleParsedKait(chatId, parsed) {
       ],
     },
   });
+  sessions.set(String(chatId), { mode: "confirm_kait", parsed, draftMessageId: draftMessage.message_id });
 }
 
-async function createOrderFromSession(chatId, from) {
+async function createOrderFromSession(chatId, from, callbackMessageId) {
   const session = sessions.get(String(chatId));
   if (!session || session.mode !== "confirm_kait") {
     await sendMessage(chatId, "Tidak ada draft order aktif.");
@@ -416,6 +424,7 @@ async function createOrderFromSession(chatId, from) {
             : item
         )
       );
+      await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
       return;
     } catch (error) {
       const sent = await sendMessage(chatId, `${lines.join("\n")}\n\nQR image gagal dibuat, QRIS payload:\n<code>${invoice.qrText}</code>`, {
@@ -428,6 +437,7 @@ async function createOrderFromSession(chatId, from) {
             : item
         )
       );
+      await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
       return;
     }
   }
@@ -440,6 +450,7 @@ async function createOrderFromSession(chatId, from) {
         : item
     )
   );
+  await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
 }
 
 async function handleConvert(chatId, text) {
@@ -505,7 +516,12 @@ async function markOrderPaid(orderId) {
   let updatedOrder = null;
   ordersStore.update((current) =>
     current.map((order) => {
-      if (String(order.id) !== String(orderId) || order.status !== "WAITING_PAYMENT") return order;
+      if (
+        String(order.id) !== String(orderId) ||
+        !["WAITING_PAYMENT", "CANCELLED"].includes(order.status)
+      ) {
+        return order;
+      }
       updatedOrder = {
         ...order,
         status: "QUEUED",
@@ -542,17 +558,34 @@ async function checkAndUpdatePayment(chatId, orderId) {
   const status = await checkPaymentStatus(target.payment);
   if (status === "PAID") {
     const paidOrder = await markOrderPaid(orderId);
-    const queueInfo = paidOrder ? getQueueInfo(paidOrder.id) : null;
-    const queueText = queueInfo
-      ? `\nAkun di depan: ${queueInfo.accountsBefore}\nTotal akun aktif: ${queueInfo.totalActiveAccounts}\nEstimasi mulai: ${formatDuration(queueInfo.etaMs)}`
-      : "";
-    await sendMessage(chatId, `Pembayaran order #${orderId} diterima. Order masuk antrian.${queueText}`);
+    if (paidOrder) {
+      await deleteMessage(chatId, target.messageId);
+    }
+  } else if (target.status === "CANCELLED") {
+    await sendMessage(chatId, `Order #${orderId} sudah dibatalkan dan pembayaran belum terdeteksi.`);
   } else {
     await sendMessage(chatId, `Status pembayaran order #${orderId}: ${status}.`);
   }
 }
 
 async function cancelOrder(chatId, orderId) {
+  const target = ordersStore.read().find((order) => String(order.id) === String(orderId));
+  if (!target) {
+    await sendMessage(chatId, "Order tidak ditemukan.");
+    return;
+  }
+
+  if (target.status === "WAITING_PAYMENT") {
+    const status = await checkPaymentStatus(target.payment);
+    if (status === "PAID") {
+      const paidOrder = await markOrderPaid(orderId);
+      if (paidOrder) {
+        await sendMessage(chatId, `Pembayaran order #${orderId} sudah terdeteksi. Order masuk antrian, tidak dibatalkan.`);
+        return;
+      }
+    }
+  }
+
   let cancelledOrder = null;
   ordersStore.update((orders) =>
     orders.map((order) => {
@@ -581,7 +614,13 @@ async function autoCheckPayments() {
   try {
     const orders = ordersStore
       .read()
-      .filter((order) => order.status === "WAITING_PAYMENT")
+      .filter((order) => {
+        if (order.status === "WAITING_PAYMENT") return true;
+        if (order.status !== "CANCELLED") return false;
+        if (!order.cancelledAt) return false;
+        const cancelledAgeMs = Date.now() - new Date(order.cancelledAt).getTime();
+        return Number.isFinite(cancelledAgeMs) && cancelledAgeMs < 10 * 60 * 1000;
+      })
       .slice(0, 10);
 
     for (const order of orders) {
@@ -591,14 +630,7 @@ async function autoCheckPayments() {
 
         const paidOrder = await markOrderPaid(order.id);
         if (paidOrder) {
-          const queueInfo = getQueueInfo(paidOrder.id);
-          const queueText = queueInfo
-            ? `\nAkun di depan: ${queueInfo.accountsBefore}\nTotal akun aktif: ${queueInfo.totalActiveAccounts}\nEstimasi mulai: ${formatDuration(queueInfo.etaMs)}`
-            : "";
-          await sendMessage(
-            paidOrder.telegramId,
-            `Pembayaran order #${paidOrder.id} diterima otomatis. Order masuk antrian.${queueText}`
-          );
+          log(`payment auto accepted for order #${paidOrder.id}; progress message will be sent by worker`);
         }
       } catch (error) {
         console.error(`[payment] order #${order.id}: ${error.message}`);
@@ -654,7 +686,7 @@ async function handleAdminCommand(chatId, text) {
   if (command === "/setmin") {
     const minAccounts = Number(args[0]);
     if (!Number.isInteger(minAccounts) || minAccounts <= 0) {
-      await sendMessage(chatId, "Format: /setmin 10");
+      await sendMessage(chatId, "Format: /setmin 1");
       return true;
     }
     settingsStore.update((settings) => ({ ...settings, minAccounts }));
@@ -793,9 +825,10 @@ async function handleCallback(query) {
     return;
   }
 
-  if (data === "confirm_kait") return createOrderFromSession(chatId, from);
+  if (data === "confirm_kait") return createOrderFromSession(chatId, from, query.message?.message_id);
   if (data === "cancel_session") {
     sessions.delete(String(chatId));
+    await deleteMessage(chatId, query.message?.message_id);
     await sendMessage(chatId, "Dibatalkan.");
     return;
   }
