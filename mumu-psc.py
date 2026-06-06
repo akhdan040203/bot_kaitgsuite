@@ -132,11 +132,15 @@ class EmulatorAutomator:
             "Oke",
             "Nanti saja",
         ]
+        # Cek INSTAN (timeout=0): dialog crash kalau ada pasti sudah tampil, jadi tidak
+        # perlu nunggu per-tombol (dulu 10 tombol x 1 detik = ~10 detik terbuang tiap panggil).
         for text in dialog_buttons:
             try:
-                if self.device(textMatches="(?i)" + text).click_exists(timeout=action_timeout(1)):
+                sel = self.device(textMatches="(?i)" + text)
+                if sel.exists(timeout=0):
+                    sel.click()
                     self.log_warn(f"Dismissed dialog/button: {text}")
-                    pause(0.5)
+                    pause(0.3)
                     return True
             except Exception:
                 continue
@@ -245,7 +249,7 @@ class EmulatorAutomator:
         return False
 
     def click_google_next(self, step_name="Next"):
-        self.log_info(f"{step_name}: trying Google NEXT button selectors")
+        # ENTER dulu: paling cepat dan sering langsung memajukan layar.
         try:
             self.device.press("enter")
             pause(0.3)
@@ -253,76 +257,48 @@ class EmulatorAutomator:
         except Exception as e:
             self.log_warn(f"{step_name}: ENTER press failed: {e}")
 
-        if self.click_candidates(
-            resource_ids=[
-                "identifierNext",
-                "passwordNext",
-                "com.google.android.gms:id/identifierNext",
-                "com.google.android.gms:id/passwordNext",
-                "com.google.android.gms:id/next_button",
-                "com.google.android.gms:id/suw_navbar_next",
-            ],
-            texts=["NEXT", "Next", "Berikutnya", "BERIKUTNYA"],
-            timeout=2,
-        ):
-            self.log_info(f"{step_name}: NEXT clicked by selector")
-            return True
+        next_ids = [
+            "identifierNext",
+            "passwordNext",
+            "com.google.android.gms:id/identifierNext",
+            "com.google.android.gms:id/passwordNext",
+            "com.google.android.gms:id/next_button",
+            "com.google.android.gms:id/suw_navbar_next",
+        ]
+        next_texts = ["NEXT", "Next", "Berikutnya", "BERIKUTNYA"]
 
-        self.log_warn(f"{step_name}: selector failed, trying visible button fallback")
-        try:
-            buttons = self.device(className="android.widget.Button")
-            if hasattr(buttons, "count") and buttons.count > 0:
-                self.log_info(f"{step_name}: found {buttons.count} android.widget.Button elements")
-                for i in range(buttons.count):
-                    btn = self.device(className="android.widget.Button", instance=i)
-                    info = btn.info or {}
-                    text = str(info.get("text", "")).lower()
-                    desc = str(info.get("contentDescription", "")).lower()
-                    bounds = info.get("bounds", {})
-                    self.log_info(f"{step_name}: button[{i}] text='{text}' desc='{desc}' bounds={bounds}")
-                    if "next" in text or "berikut" in text or "next" in desc or "berikut" in desc:
-                        if bounds:
-                            x = int((bounds["left"] + bounds["right"]) / 2)
-                            y = int((bounds["top"] + bounds["bottom"]) / 2)
-                            self.device.click(x, y)
-                        else:
-                            btn.click()
-                        self.log_info(f"{step_name}: NEXT clicked by button instance {i}")
-                        return True
-        except Exception as e:
-            self.log_warn(f"{step_name}: button fallback failed: {e}")
+        # Cek INSTAN (timeout=0): klik tombol Next kalau sudah kelihatan. Tanpa nunggu.
+        for rid in next_ids:
+            try:
+                sel = self.device(resourceId=rid)
+                if sel.exists(timeout=0):
+                    sel.click()
+                    self.log_info(f"{step_name}: NEXT clicked by id {rid}")
+                    return True
+            except Exception:
+                continue
+        for t in next_texts:
+            try:
+                sel = self.device(textMatches="(?i)" + t)
+                if sel.exists(timeout=0):
+                    sel.click()
+                    self.log_info(f"{step_name}: NEXT clicked by text {t}")
+                    return True
+            except Exception:
+                continue
 
-        try:
-            hierarchy = self.device.dump_hierarchy(compressed=True) or ""
-            lower_hierarchy = hierarchy.lower()
-            self.log_info(
-                f"{step_name}: hierarchy has next={('next' in lower_hierarchy)} "
-                f"berikut={('berikut' in lower_hierarchy)} length={len(hierarchy)}"
-            )
-        except Exception as e:
-            self.log_warn(f"{step_name}: dump hierarchy failed: {e}")
+        # Belum kelihatan: tunggu SINGKAT tombol utama (maks ~action_timeout(2)).
+        for rid in ["identifierNext", "passwordNext"]:
+            try:
+                if self.device(resourceId=rid).click_exists(timeout=action_timeout(2)):
+                    self.log_info(f"{step_name}: NEXT clicked after short wait by id {rid}")
+                    return True
+            except Exception:
+                continue
 
-        try:
-            w, h = self.device.window_size()
-            taps = [
-                (int(w * 0.82), int(h * 0.94)),
-                (int(w * 0.86), int(h * 0.94)),
-                (int(w * 0.84), int(h * 0.90)),
-            ]
-            for x, y in taps:
-                self.log_warn(f"{step_name}: fallback tap coordinate x={x} y={y}")
-                self.device.click(x, y)
-                pause(0.4)
-                try:
-                    self.device.shell(f"input tap {x} {y}")
-                    self.log_warn(f"{step_name}: adb input tap coordinate x={x} y={y}")
-                    pause(0.4)
-                except Exception as shell_error:
-                    self.log_warn(f"{step_name}: adb input tap failed: {shell_error}")
-            return True
-        except Exception as e:
-            self.log_error(f"{step_name}: coordinate fallback failed: {e}")
-            return False
+        # Tidak ada tombol Next sama sekali -> ENTER kemungkinan sudah memajukan layar.
+        self.log_info(f"{step_name}: tombol Next tidak ada, anggap ENTER sudah lanjut")
+        return True
 
     def login_google(self, email, password):
         try:
@@ -334,13 +310,22 @@ class EmulatorAutomator:
             existing_google_accounts = self._google_account_emails_dumpsys()
             if existing_google_accounts:
                 self.log_warn(
-                    "Google account existing detected in dumpsys: "
+                    "Akun Google sisa terdeteksi: "
                     + ", ".join(existing_google_accounts)
-                    + ". Stop login to avoid duplicate account."
+                    + ". Hapus dulu biar tidak numpuk/duplikat sebelum login akun baru."
                 )
-                return False
-
-            self.log_info("No existing Google account detected, continuing Add account flow")
+                for leftover in existing_google_accounts:
+                    self.fast_remove_google_account(leftover)
+                # Buka lagi halaman Accounts untuk lanjut Add account.
+                self.device.shell("am start -a android.settings.SYNC_SETTINGS")
+                pause(1.5)
+                self.dismiss_crash_dialogs()
+                if self._google_account_emails_dumpsys():
+                    self.log_error("Masih ada akun sisa setelah dihapus, lewati akun ini.")
+                    return False
+                self.log_info("Akun sisa berhasil dibersihkan, lanjut Add account.")
+            else:
+                self.log_info("No existing Google account detected, continuing Add account flow")
             if not self.click_candidates(
                 resource_ids=["android:id/title"],
                 texts=["Add account", "Tambah akun", "Add an account"],
@@ -360,29 +345,59 @@ class EmulatorAutomator:
                 self.log_error("Cannot find Google account provider")
                 return False
 
-            pause(3)
+            pause(1.5)
             self.dismiss_crash_dialogs()
 
             self.log_info(f"Input Google email: {email}")
             if not self.set_text_fast(email, timeout=5, className="android.widget.EditText"):
                 self.log_error("Cannot find Google email input")
                 return False
-            pause(0.5)
+            pause(0.3)
             if not self.click_google_next("Email step"):
                 self.log_error("Cannot click NEXT after email input")
                 return False
-            pause(2)
             self.dismiss_crash_dialogs()
 
+            # Tunggu layar password BENAR-BENAR muncul sebelum ketik, biar password
+            # tidak salah masuk ke field email yang masih transisi.
+            self.log_info("Menunggu layar password siap...")
+            self.device(
+                textMatches="(?i)Enter your password|Show password|Masukkan sandi|Lihat sandi"
+            ).exists(timeout=action_timeout(8))
+
             self.log_info("Input Google password")
-            if not self.set_text_fast(password, timeout=5, className="android.widget.EditText"):
+            pwd_field = self.device(className="android.widget.EditText")
+            if not pwd_field.exists(timeout=action_timeout(6)):
                 self.log_error("Cannot find Google password input")
                 return False
-            pause(1)
+
+            # Isi password dengan FOKUS + VERIFIKASI + RETRY biar tidak kosong saat klik NEXT.
+            filled = False
+            for attempt in range(1, 4):
+                try:
+                    pwd_field.click()          # fokuskan field dulu
+                    pause(0.2)
+                    pwd_field.set_text(password)
+                except Exception as e:
+                    self.log_warn(f"Isi password gagal (attempt {attempt}): {e}")
+                pause(0.4)
+                # Cek field benar-benar terisi sebelum lanjut.
+                try:
+                    current = (self.device(className="android.widget.EditText").info or {}).get("text", "") or ""
+                except Exception:
+                    current = ""
+                if current.strip():
+                    filled = True
+                    self.log_info(f"Password terisi (attempt {attempt})")
+                    break
+                self.log_warn(f"Password terbaca kosong, ulangi isi (attempt {attempt})")
+
+            if not filled:
+                self.log_warn("Password verif kosong (mungkin ter-mask), tetap lanjut klik NEXT")
+            pause(0.3)
             if not self.click_google_next("Password step"):
                 self.log_error("Cannot click NEXT after password input")
                 return False
-            pause(3)
             self.dismiss_crash_dialogs()
 
             confirmation_buttons = [
@@ -395,38 +410,56 @@ class EmulatorAutomator:
                 "Terima",
             ]
 
-            for _ in range(8):
-                if self._verify_google_account_dumpsys(email):
-                    self.log_info("Account already registered during confirmation screen, continue to Play Store")
-                    return True
+            # Layar konfirmasi (Terms of Service / Welcome to your new account).
+            # Pola satset: klik tombol kalau SUDAH kelihatan; kalau belum kelihatan,
+            # LANGSUNG scroll ke bawah (tombol I UNDERSTAND/ACCEPT ada di paling bawah)
+            # lalu klik. Tanpa nunggu lama.
+            def _click_confirm_visible():
+                for ct in confirmation_buttons:
+                    try:
+                        sel = self.device(textMatches="(?i)" + ct)
+                        if sel.exists(timeout=0):
+                            sel.click()
+                            self.log_info(f"Clicked confirmation: {ct}")
+                            return True
+                    except Exception:
+                        continue
+                return False
 
-                clicked = self.click_candidates(
-                    resource_ids=[
-                        "com.google.android.gms:id/next_button",
-                        "com.google.android.gms:id/suw_navbar_next",
-                        "android:id/button1",
-                    ],
-                    texts=confirmation_buttons,
-                    timeout=3,
-                )
-                self.dismiss_crash_dialogs()
+            for _ in range(6):
+                clicked = _click_confirm_visible()
+
+                # Belum kelihatan -> langsung scroll ke bawah sekali, lalu klik lagi.
                 if not clicked:
-                    break
+                    try:
+                        scroller = self.device(scrollable=True)
+                        if scroller.exists(timeout=0):
+                            scroller.scroll.toEnd(max_swipes=4)
+                            clicked = _click_confirm_visible()
+                    except Exception:
+                        pass
+
+                self.dismiss_crash_dialogs()
+
+                if clicked:
+                    pause(0.8)
+                    if self._verify_google_account_dumpsys(email):
+                        self.log_info(f"Account terverifikasi tersimpan: {email}")
+                        return True
+                    continue
+
+                # Tidak ada tombol sama sekali: cek akun; kalau belum, beri waktu layar muncul.
+                if self._verify_google_account_dumpsys(email):
+                    self.log_info(f"Account terverifikasi tersimpan: {email}")
+                    return True
                 pause(1)
 
+            # Verifikasi akun tersimpan: cek singkat (maks ~6 detik), bukan 18 detik.
+            for attempt in range(1, 5):
                 if self._verify_google_account_dumpsys(email):
-                    self.log_info("Account registered after confirmation click, continue to Play Store")
+                    self.log_info(f"Account terverifikasi tersimpan: {email}")
                     return True
-
-            if self._verify_google_account_dumpsys(email):
-                return True
-
-            self.log_info("Account belum sync, mulai polling dumpsys account")
-            for attempt in range(1, 7):
-                pause(3)
-                if self._verify_google_account_dumpsys(email):
-                    return True
-                self.log_info(f"Account belum sync, tunggu 3s... ({attempt}/6)")
+                pause(1.5)
 
             self.log_error(f"Google account failed dumpsys verification: {email}")
             return False
@@ -459,69 +492,80 @@ class EmulatorAutomator:
         ]
         
         for text, action in popup_elements:
-            if self.device(text=text).exists(timeout=action_timeout(1)):
+            if self.device(text=text).exists(timeout=0):
                 self.log_info(f"Found popup '{text}', handling...")
                 action()
-                pause(0.5)
+                pause(0.3)
                 break
         
         self.log_info("Popup check completed")
 
     def fast_remove_google_account(self, email):
-        """Optimized account removal with reduced waits"""
+        """Hapus akun Google dengan navigasi & konfirmasi yang lebih tahan banting."""
         try:
-            self.log_info(f"====== STARTING ACCOUNT REMOVAL ======")
+            self.log_info("====== STARTING ACCOUNT REMOVAL ======")
             self.log_info(f"Target email: {email}")
-            
-            # Quick app start
+
             self.device.app_start("com.android.settings")
             pause(1)
-            
-            # Fast navigation to Passwords & accounts
-            if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(3)):
-                self.device(scrollable=True).scroll.to(text="Passwords & accounts")
-                if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(2)):
-                    self.log_error(f"Cannot find Passwords & accounts menu")
-                    return False
+            self.dismiss_crash_dialogs()
 
+            # Buka "Passwords & accounts" (scroll cari kalau perlu, di-guard biar tidak error).
+            if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(3)):
+                try:
+                    self.device(scrollable=True).scroll.to(text="Passwords & accounts")
+                except Exception:
+                    pass
+                if not self.device(text="Passwords & accounts").click_exists(timeout=action_timeout(2)):
+                    self.log_error("Cannot find Passwords & accounts menu")
+                    return False
             pause(1)
-            
-            # Quick email account search and click
-            if not self.device(text=f"{email}").click_exists(timeout=action_timeout(5)):
-                self.device(scrollable=True).scroll.to(text=f"{email}")
-                if not self.device(text=f"{email}").click_exists(timeout=action_timeout(3)):
+
+            # Klik akun email-nya.
+            if not self.device(text=email).click_exists(timeout=action_timeout(4)):
+                try:
+                    self.device(scrollable=True).scroll.to(text=email)
+                except Exception:
+                    pass
+                if not self.device(text=email).click_exists(timeout=action_timeout(3)):
+                    # Tidak ada di daftar -> kemungkinan memang sudah terhapus.
+                    if not self._verify_google_account_dumpsys(email):
+                        self.log_info(f"Account {email} sudah tidak ada, anggap terhapus")
+                        return True
                     self.log_error(f"Cannot find account {email}")
                     return False
-            
             pause(1)
 
-            # Fast remove account
-            remove_texts = ["REMOVE ACCOUNT", "Remove account", "Hapus akun", "HAPUS AKUN"]
+            # Klik "Remove account".
             removed = False
-            
-            for text in remove_texts:
-                if self.device(text=text).click_exists(timeout=action_timeout(2)):
-                    self.log_info(f"Clicked '{text}'")
-                    pause(0.5)
-                    # Double confirmation
-                    self.device(text=text).click_exists(timeout=action_timeout(2))
+            for t in ["REMOVE ACCOUNT", "Remove account", "Hapus akun", "HAPUS AKUN"]:
+                if self.device(text=t).click_exists(timeout=action_timeout(2)):
+                    self.log_info(f"Clicked '{t}'")
                     removed = True
                     break
-
             if not removed:
-                self.log_error(f"Cannot find Remove Account button")
+                self.log_error("Cannot find Remove Account button")
                 return False
 
-            pause(2)
-            
-            # Quick verification
-            if self.device(text=f"{email}").exists(timeout=action_timeout(3)):
-                self.log_error(f"Account {email} still detected after removal")
-                return False
-            
-            self.log_info(f"Account {email} successfully removed")
-            return True
-            
+            # Konfirmasi dialog hapus (tombol konfirmasi / android:id/button1).
+            pause(0.5)
+            confirmed = False
+            for t in ["Remove account", "REMOVE ACCOUNT", "Hapus akun", "HAPUS AKUN", "OK"]:
+                if self.device(text=t).click_exists(timeout=action_timeout(2)):
+                    confirmed = True
+                    break
+            if not confirmed:
+                self.device(resourceId="android:id/button1").click_exists(timeout=action_timeout(1))
+
+            # Verifikasi terhapus pakai dumpsys (paling akurat), cek beberapa kali singkat.
+            for _ in range(4):
+                pause(1)
+                if not self._verify_google_account_dumpsys(email):
+                    self.log_info(f"Account {email} successfully removed")
+                    return True
+            self.log_error(f"Account {email} masih terdeteksi setelah remove")
+            return False
+
         except Exception as e:
             self.log_error(f"Error removing account {email}: {e}")
             return False
@@ -537,10 +581,23 @@ class EmulatorAutomator:
                 return False
             self.emit_progress(email, 20, "login google berhasil")
 
-            # Quick Play Store launch
+            # Quick Play Store launch (smart-wait, bukan jeda buta)
             self.device.press("home")
             self.device.app_start("com.android.vending")
-            pause(5)
+            # Tunggu sampai Play Store siap: cek semua penanda beranda barengan tiap 0.4s,
+            # langsung lanjut begitu salah satu muncul (cepat, tidak nunggu buta).
+            store_ready = False
+            deadline = time.time() + action_timeout(8)
+            while time.time() < deadline:
+                if (self.device(resourceId="com.android.vending:id/account_menu_item").exists(timeout=0)
+                        or self.device(descriptionContains="Account").exists(timeout=0)
+                        or self.device(text="Games").exists(timeout=0)
+                        or self.device(text="For you").exists(timeout=0)):
+                    store_ready = True
+                    break
+                pause(0.4)
+            if not store_ready:
+                self.log_warn("Play Store belum tampil menu utama, lanjut dengan fallback")
             self.emit_progress(email, 30, "buka play store")
 
             # Fast popup handling

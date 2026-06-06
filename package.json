@@ -5,6 +5,7 @@
   "scripts": {
     "bot": "node telegram-bot.js",
     "worker:psc": "node worker-psc.js",
+    "migrate:mongo": "node scripts/migrate-to-mongo.js",
     "test": "node -e \"require('./lib/gsuite-format'); require('./services/orderkuota'); console.log('ok')\""
   },
   "keywords": [],

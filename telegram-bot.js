@@ -3,7 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
-const { JsonStore } = require("./lib/json-store");
+const { MongoStore, connectMongo } = require("./lib/mongo-store");
 const { parseGsuiteInput } = require("./lib/gsuite-format");
 const { createQrisInvoice, checkPaymentStatus } = require("./services/orderkuota");
 
@@ -14,6 +14,8 @@ const ADMIN_IDS = new Set(
     .map((id) => id.trim())
     .filter(Boolean)
 );
+
+const ADMIN_MIN_ACCOUNTS = Number(process.env.ADMIN_MIN_ACCOUNTS || 2);
 
 if (!TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN or BOT_TOKEN in .env");
@@ -26,10 +28,17 @@ const ORDER_DIR = path.join(__dirname, "data", "orders");
 const START_LOGO_PATH =
   process.env.START_LOGO_PATH ||
   "D:\\Asset Shope\\Premkuy Store\\Blue Minimalist Application Initial Letter P logo (1).png";
-const usersStore = new JsonStore(path.join(DATA_DIR, "users.json"), {});
-const ordersStore = new JsonStore(path.join(DATA_DIR, "orders.json"), []);
-const settingsStore = new JsonStore(path.join(DATA_DIR, "settings.json"), {
+const DEFAULT_PRICE_TIERS = [
+  { minAccounts: 20, pricePerAccount: 210 },
+  { minAccounts: 100, pricePerAccount: 200 },
+  { minAccounts: 600, pricePerAccount: 190 },
+];
+
+const usersStore = new MongoStore("users", {});
+const ordersStore = new MongoStore("orders", []);
+const settingsStore = new MongoStore("settings", {
   pricePerAccount: Number(process.env.DEFAULT_PRICE_PER_ACCOUNT || 2000),
+  priceTiers: DEFAULT_PRICE_TIERS,
   minAccounts: Number(process.env.MIN_KAIT_ACCOUNTS || 1),
   support: process.env.SUPPORT_USERNAME || "@admin",
   uniquePaymentCode: process.env.UNIQUE_PAYMENT_CODE !== "false",
@@ -51,6 +60,45 @@ function formatRupiah(value) {
   return `Rp ${Number(value || 0).toLocaleString("id-ID")}`;
 }
 
+function getPriceTiers(settings) {
+  const tiers =
+    Array.isArray(settings.priceTiers) && settings.priceTiers.length
+      ? settings.priceTiers
+      : [{ minAccounts: settings.minAccounts || 1, pricePerAccount: settings.pricePerAccount || 2000 }];
+  return tiers
+    .map((t) => ({ minAccounts: Number(t.minAccounts), pricePerAccount: Number(t.pricePerAccount) }))
+    .filter((t) => Number.isFinite(t.minAccounts) && Number.isFinite(t.pricePerAccount))
+    .sort((a, b) => a.minAccounts - b.minAccounts);
+}
+
+// Harga per akun = tier tertinggi yang jumlah akunnya sudah tercapai.
+function getPricePerAccount(count, settings) {
+  const tiers = getPriceTiers(settings);
+  if (!tiers.length) return Number(settings.pricePerAccount || 2000);
+  let price = tiers[0].pricePerAccount;
+  for (const tier of tiers) {
+    if (count >= tier.minAccounts) price = tier.pricePerAccount;
+  }
+  return price;
+}
+
+function getMinOrderAccounts(settings) {
+  const tiers = getPriceTiers(settings);
+  return tiers.length ? tiers[0].minAccounts : Number(settings.minAccounts || 1);
+}
+
+// Admin boleh order dengan minimal lebih kecil daripada user biasa.
+function getMinOrderForChat(chatId, settings) {
+  if (isAdmin(chatId)) return ADMIN_MIN_ACCOUNTS;
+  return getMinOrderAccounts(settings);
+}
+
+function renderPriceTiers(settings) {
+  return getPriceTiers(settings)
+    .map((t) => `• Min ${t.minAccounts} Akun: <b>${formatRupiah(t.pricePerAccount)}</b> /akun`)
+    .join("\n");
+}
+
 function formatDuration(ms) {
   const totalMinutes = Math.max(1, Math.ceil(Number(ms || 0) / 60000));
   const hours = Math.floor(totalMinutes / 60);
@@ -67,8 +115,8 @@ function formatTelegramSupport(value) {
   return `<a href="https://t.me/${username}">@${username}</a>`;
 }
 
-function getQueueInfo(orderId) {
-  const orders = ordersStore.read();
+function getQueueInfo(orderId, allOrders) {
+  const orders = allOrders || [];
   const activeOrders = orders.filter((order) => ["RUNNING", "QUEUED"].includes(order.status));
   const index = activeOrders.findIndex((order) => String(order.id) === String(orderId));
   if (index === -1) return null;
@@ -152,6 +200,28 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
+async function notifyAdmins(text, exceptChatId) {
+  for (const adminId of ADMIN_IDS) {
+    if (exceptChatId && String(adminId) === String(exceptChatId)) continue;
+    try {
+      await sendMessage(adminId, text);
+    } catch (_) {}
+  }
+}
+
+function statusIcon(status) {
+  return (
+    {
+      DONE: "✅",
+      RUNNING: "🟢",
+      QUEUED: "🕒",
+      WAITING_PAYMENT: "💳",
+      CANCELLED: "❌",
+      FAILED: "⚠️",
+    }[status] || "•"
+  );
+}
+
 async function deleteMessage(chatId, messageId) {
   if (!chatId || !messageId) return;
   try {
@@ -201,9 +271,9 @@ async function sendDocument(chatId, filePath, caption) {
   if (!data.ok) throw new Error(data.description || "sendDocument failed");
 }
 
-function upsertUser(from) {
+async function upsertUser(from) {
   const id = String(from.id);
-  usersStore.update((users) => {
+  const users = await usersStore.update((users) => {
     if (!users[id]) {
       users[id] = {
         telegramId: id,
@@ -219,12 +289,12 @@ function upsertUser(from) {
     }
     return users;
   });
-  return usersStore.read()[id];
+  return users[id];
 }
 
-function botStats() {
-  const users = usersStore.read();
-  const orders = ordersStore.read();
+async function botStats() {
+  const users = await usersStore.read();
+  const orders = await ordersStore.read();
   const totalKait = orders
     .filter((order) => order.status === "DONE")
     .reduce((sum, order) => sum + Number(order.successCount || 0), 0);
@@ -232,8 +302,8 @@ function botStats() {
 }
 
 async function showHome(chatId, from) {
-  const user = upsertUser(from);
-  const settings = settingsStore.read();
+  const user = await upsertUser(from);
+  const settings = await settingsStore.read();
   const username = user.username ? `@${user.username}` : "-";
   const homeText = [
     `Halo ${user.firstName || "User"}`,
@@ -246,7 +316,7 @@ async function showHome(chatId, from) {
     "",
     "<b>Configuration</b>",
     "L Payment: QRIS",
-    `L Harga: ${formatRupiah(settings.pricePerAccount)} / akun`,
+    `L Harga: mulai ${formatRupiah(Math.min(...getPriceTiers(settings).map((t) => t.pricePerAccount)))} / akun`,
     `L Support: ${formatTelegramSupport(settings.support)}`,
   ].join("\n");
 
@@ -259,8 +329,8 @@ async function showHome(chatId, from) {
 }
 
 async function showStatus(chatId, from) {
-  const user = upsertUser(from);
-  const orders = ordersStore.read().filter((order) => order.telegramId === String(from.id));
+  const user = await upsertUser(from);
+  const orders = (await ordersStore.read()).filter((order) => order.telegramId === String(from.id));
   const active = orders.filter((order) => ["QUEUED", "RUNNING"].includes(order.status));
   const done = orders.filter((order) => order.status === "DONE");
   const waitingPayment = orders.filter((order) => order.status === "WAITING_PAYMENT");
@@ -288,7 +358,8 @@ async function downloadTelegramFile(fileId) {
 }
 
 function buildOrderSummary(parsed, settings) {
-  const basePrice = parsed.valid.length * settings.pricePerAccount;
+  const pricePerAccount = getPricePerAccount(parsed.valid.length, settings);
+  const basePrice = parsed.valid.length * pricePerAccount;
   return [
     "<b>Order Kait PSC</b>",
     "",
@@ -297,7 +368,7 @@ function buildOrderSummary(parsed, settings) {
     `Invalid: ${parsed.invalid.length}`,
     `Duplicate: ${parsed.duplicate}`,
     "",
-    `Harga: ${formatRupiah(settings.pricePerAccount)} / akun`,
+    `Harga: ${formatRupiah(pricePerAccount)} / akun (sesuai jumlah akun)`,
     `Subtotal: <b>${formatRupiah(basePrice)}</b>`,
     "Total final dibuat setelah QRIS agar bisa diberi kode unik.",
   ].join("\n");
@@ -314,13 +385,14 @@ function getUniquePaymentCode(orderId, settings) {
 }
 
 async function handleParsedKait(chatId, parsed) {
-  const settings = settingsStore.read();
+  const settings = await settingsStore.read();
   if (settings.paused) {
     await sendMessage(chatId, "Bot sedang pause. Coba lagi nanti.");
     return;
   }
-  if (parsed.valid.length < settings.minAccounts) {
-    await sendMessage(chatId, `Minimal ${settings.minAccounts} akun valid. Akun valid kamu: ${parsed.valid.length}.`);
+  const minOrder = getMinOrderForChat(chatId, settings);
+  if (parsed.valid.length < minOrder) {
+    await sendMessage(chatId, `Minimal ${minOrder} akun valid. Akun valid kamu: ${parsed.valid.length}.`);
     return;
   }
 
@@ -343,7 +415,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     return;
   }
 
-  const settings = settingsStore.read();
+  const settings = await settingsStore.read();
   const parsed = session.parsed;
   const orderId = Date.now();
   const orderPath = path.join(ORDER_DIR, String(orderId));
@@ -354,7 +426,8 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     parsed.invalid.map((item) => `${item.raw} # ${item.reason}`).join("\n")
   );
 
-  const basePrice = parsed.valid.length * settings.pricePerAccount;
+  const pricePerAccount = getPricePerAccount(parsed.valid.length, settings);
+  const basePrice = parsed.valid.length * pricePerAccount;
   const uniqueCode = getUniquePaymentCode(orderId, settings);
   const totalPrice = basePrice + uniqueCode;
   let invoice;
@@ -374,7 +447,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     totalAccounts: parsed.valid.length,
     invalidAccounts: parsed.invalid.length,
     duplicateAccounts: parsed.duplicate,
-    pricePerAccount: settings.pricePerAccount,
+    pricePerAccount,
     basePrice,
     uniqueCode,
     totalPrice,
@@ -386,12 +459,26 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     updatedAt: now,
   };
 
-  ordersStore.update((orders) => {
+  await ordersStore.update((orders) => {
     orders.push(order);
     return orders;
   });
   log(`created order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts} total=${order.totalPrice}`);
   sessions.delete(String(chatId));
+
+  await notifyAdmins(
+    [
+      "🔔 <b>Order Baru Masuk</b>",
+      "",
+      `🆔 Order: <code>${orderId}</code>`,
+      `👤 User: ${order.username ? "@" + order.username : order.telegramId}`,
+      `📧 Jumlah akun: <b>${order.totalAccounts}</b>`,
+      `💵 Harga/akun: ${formatRupiah(pricePerAccount)}`,
+      `💰 Total bayar: <b>${formatRupiah(totalPrice)}</b>`,
+      "💳 Status: Menunggu pembayaran",
+    ].join("\n"),
+    String(from.id)
+  );
 
   const lines = [
     `<b>QRIS Order #${orderId}</b>`,
@@ -417,7 +504,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=700x700&data=${encodeURIComponent(invoice.qrText)}`;
     try {
       const sent = await sendPhoto(chatId, qrImageUrl, lines.join("\n"), { reply_markup: replyMarkup });
-      ordersStore.update((orders) =>
+      await ordersStore.update((orders) =>
         orders.map((item) =>
           item.id === orderId
             ? { ...item, paymentMessageId: sent.message_id, paymentChatId: String(chatId) }
@@ -430,7 +517,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
       const sent = await sendMessage(chatId, `${lines.join("\n")}\n\nQR image gagal dibuat, QRIS payload:\n<code>${invoice.qrText}</code>`, {
         reply_markup: replyMarkup,
       });
-      ordersStore.update((orders) =>
+      await ordersStore.update((orders) =>
         orders.map((item) =>
           item.id === orderId
             ? { ...item, paymentMessageId: sent.message_id, paymentChatId: String(chatId) }
@@ -443,7 +530,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   }
 
   const sent = await sendMessage(chatId, lines.join("\n"), { reply_markup: replyMarkup });
-  ordersStore.update((orders) =>
+  await ordersStore.update((orders) =>
     orders.map((item) =>
       item.id === orderId
         ? { ...item, paymentMessageId: sent.message_id, paymentChatId: String(chatId) }
@@ -475,7 +562,7 @@ async function handleConvert(chatId, text) {
 }
 
 async function showQueue(chatId, telegramId) {
-  const allOrders = ordersStore.read();
+  const allOrders = await ordersStore.read();
   const activeOrders = allOrders.filter((order) => ["RUNNING", "QUEUED"].includes(order.status));
   const totalQueueAccounts = activeOrders.reduce(
     (sum, order) => sum + Number(order.remainingCount || order.totalAccounts || 0),
@@ -490,21 +577,30 @@ async function showQueue(chatId, telegramId) {
     .slice(-10)
     .reverse();
 
+  const peopleInQueue = new Set(activeOrders.map((order) => String(order.telegramId))).size;
+
   await sendMessage(
     chatId,
     [
-      "<b>Total Antrian</b>",
-      `Total akun ngait: <b>${totalQueueAccounts}</b>`,
-      `Total order aktif: ${totalQueueOrders}`,
+      "📋 <b>Antrian Ngait</b>",
       "",
-      "<b>Antrian Kamu</b>",
+      `👥 Orang di antrian: <b>${peopleInQueue}</b>`,
+      `📦 Order aktif: <b>${totalQueueOrders}</b>`,
+      `📧 Total gsuite ngait: <b>${totalQueueAccounts}</b>`,
+      "",
+      "📜 <b>Antrian Kamu</b>",
       orders.length
         ? orders
             .map((order, index) => {
               const processedCount = order.status === "DONE"
                 ? Number(order.successCount || 0)
                 : Number(order.verifiedCount || order.successCount || 0);
-              return `${index + 1}. ${order.status} ${processedCount}/${order.totalAccounts}\nID: <code>${order.id}</code>`;
+              const statusIcon = order.status === "RUNNING" ? "🟢" : "🕒";
+              return [
+                `${index + 1}. ${statusIcon} <b>${order.status}</b>`,
+                `   📧 ${processedCount}/${order.totalAccounts} gsuite`,
+                `   🆔 <code>${order.id}</code>`,
+              ].join("\n");
             })
             .join("\n\n")
         : "Belum ada order paid/proses.",
@@ -514,7 +610,7 @@ async function showQueue(chatId, telegramId) {
 
 async function markOrderPaid(orderId) {
   let updatedOrder = null;
-  ordersStore.update((current) =>
+  await ordersStore.update((current) =>
     current.map((order) => {
       if (
         String(order.id) !== String(orderId) ||
@@ -548,7 +644,7 @@ async function markOrderPaid(orderId) {
 
 async function checkAndUpdatePayment(chatId, orderId) {
   let target;
-  const orders = ordersStore.read();
+  const orders = await ordersStore.read();
   target = orders.find((order) => String(order.id) === String(orderId));
   if (!target) {
     await sendMessage(chatId, "Order tidak ditemukan.");
@@ -569,7 +665,7 @@ async function checkAndUpdatePayment(chatId, orderId) {
 }
 
 async function cancelOrder(chatId, orderId) {
-  const target = ordersStore.read().find((order) => String(order.id) === String(orderId));
+  const target = (await ordersStore.read()).find((order) => String(order.id) === String(orderId));
   if (!target) {
     await sendMessage(chatId, "Order tidak ditemukan.");
     return;
@@ -587,7 +683,7 @@ async function cancelOrder(chatId, orderId) {
   }
 
   let cancelledOrder = null;
-  ordersStore.update((orders) =>
+  await ordersStore.update((orders) =>
     orders.map((order) => {
       if (String(order.id) !== String(orderId) || order.status !== "WAITING_PAYMENT") return order;
       cancelledOrder = {
@@ -612,8 +708,7 @@ async function autoCheckPayments() {
   if (isCheckingPayments) return;
   isCheckingPayments = true;
   try {
-    const orders = ordersStore
-      .read()
+    const orders = (await ordersStore.read())
       .filter((order) => {
         if (order.status === "WAITING_PAYMENT") return true;
         if (order.status !== "CANCELLED") return false;
@@ -644,8 +739,8 @@ async function autoCheckPayments() {
 async function handleAdminCommand(chatId, text) {
   const [command, ...args] = text.trim().split(" ");
   if (command === "/admin") {
-    const settings = settingsStore.read();
-    const stats = botStats();
+    const settings = await settingsStore.read();
+    const stats = await botStats();
     await sendMessage(
       chatId,
       [
@@ -657,6 +752,7 @@ async function handleAdminCommand(chatId, text) {
         "",
         `/setharga ${settings.pricePerAccount}`,
         `/setmin ${settings.minAccounts}`,
+        "/settier 20:210 100:200 600:190",
         "/orders",
         "/paid ORDER_ID",
         "/broadcast pesan",
@@ -678,7 +774,7 @@ async function handleAdminCommand(chatId, text) {
       await sendMessage(chatId, "Format: /setharga 2000");
       return true;
     }
-    settingsStore.update((settings) => ({ ...settings, pricePerAccount: price }));
+    await settingsStore.update((settings) => ({ ...settings, pricePerAccount: price }));
     await sendMessage(chatId, `Harga diubah menjadi ${formatRupiah(price)} / akun.`);
     return true;
   }
@@ -689,29 +785,69 @@ async function handleAdminCommand(chatId, text) {
       await sendMessage(chatId, "Format: /setmin 1");
       return true;
     }
-    settingsStore.update((settings) => ({ ...settings, minAccounts }));
+    await settingsStore.update((settings) => ({ ...settings, minAccounts }));
     await sendMessage(chatId, `Minimal order diubah menjadi ${minAccounts} akun.`);
     return true;
   }
 
+  if (command === "/settier") {
+    if (!args.length) {
+      await sendMessage(
+        chatId,
+        [
+          "Format: /settier 20:210 100:200 600:190",
+          "(jumlahAkun:hargaPerAkun, dipisah spasi). Tier terendah = minimal order.",
+        ].join("\n")
+      );
+      return true;
+    }
+    const tiers = [];
+    for (const part of args) {
+      const [minStr, priceStr] = part.split(":");
+      const min = Number(minStr);
+      const price = Number(priceStr);
+      if (!Number.isInteger(min) || min <= 0 || !Number.isFinite(price) || price <= 0) {
+        await sendMessage(chatId, `Format salah di "${part}". Contoh: /settier 20:210 100:200 600:190`);
+        return true;
+      }
+      tiers.push({ minAccounts: min, pricePerAccount: price });
+    }
+    tiers.sort((a, b) => a.minAccounts - b.minAccounts);
+    const newSettings = await settingsStore.update((settings) => ({
+      ...settings,
+      priceTiers: tiers,
+      minAccounts: tiers[0].minAccounts,
+    }));
+    await sendMessage(chatId, "✅ Tier harga diperbarui:\n\n" + renderPriceTiers(newSettings));
+    return true;
+  }
+
   if (command === "/orders") {
-    const orders = ordersStore.read().slice(-20).reverse();
-    await sendMessage(
-      chatId,
-      orders.length
-        ? orders.map((order) => {
-            const queueInfo = getQueueInfo(order.id);
-            const queueText = queueInfo ? ` depan ${queueInfo.accountsBefore} aktif ${queueInfo.totalActiveAccounts} est ${formatDuration(queueInfo.etaMs)}` : "";
-            return `#${order.id} @${order.username || "-"} ${order.status} ${order.successCount || 0}/${order.totalAccounts} ${formatRupiah(order.totalPrice)}${queueText}`;
-          }).join("\n")
-        : "Belum ada order."
-    );
+    const allOrders = await ordersStore.read();
+    const orders = allOrders.slice(-20).reverse();
+    const body = orders.length
+      ? orders
+          .map((order) => {
+            const queueInfo = getQueueInfo(order.id, allOrders);
+            const queueText = queueInfo
+              ? `\n   ⏳ Antri: depan ${queueInfo.accountsBefore} • aktif ${queueInfo.totalActiveAccounts} • est ${formatDuration(queueInfo.etaMs)}`
+              : "";
+            return [
+              `🆔 <code>${order.id}</code>`,
+              `   👤 ${order.username ? "@" + order.username : order.telegramId}`,
+              `   📦 Order: ${order.totalAccounts} akun  |  ✅ Done: ${order.successCount || 0}/${order.totalAccounts}`,
+              `   💰 ${formatRupiah(order.totalPrice)}  |  ${statusIcon(order.status)} ${order.status}${queueText}`,
+            ].join("\n");
+          })
+          .join("\n\n")
+      : "Belum ada order.";
+    await sendMessage(chatId, [`📒 <b>Daftar Order</b> (20 terakhir)`, "", body].join("\n"));
     return true;
   }
 
   if (command === "/paid") {
     const orderId = args[0];
-    ordersStore.update((orders) =>
+    await ordersStore.update((orders) =>
       orders.map((order) =>
         String(order.id) === String(orderId)
           ? {
@@ -734,7 +870,7 @@ async function handleAdminCommand(chatId, text) {
       await sendMessage(chatId, "Format: /broadcast pesan");
       return true;
     }
-    const users = usersStore.read();
+    const users = await usersStore.read();
     let sent = 0;
     for (const id of Object.keys(users)) {
       try {
@@ -748,7 +884,7 @@ async function handleAdminCommand(chatId, text) {
 
   if (command === "/pause" || command === "/resume") {
     const paused = command === "/pause";
-    settingsStore.update((settings) => ({ ...settings, paused }));
+    await settingsStore.update((settings) => ({ ...settings, paused }));
     await sendMessage(chatId, paused ? "Bot dipause." : "Bot aktif kembali.");
     return true;
   }
@@ -759,7 +895,7 @@ async function handleAdminCommand(chatId, text) {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const from = message.from || message.chat;
-  upsertUser(from);
+  await upsertUser(from);
 
   const text = message.text || "";
   if (text.startsWith("/") && isAdmin(chatId) && (await handleAdminCommand(chatId, text))) return;
@@ -805,11 +941,12 @@ async function handleCallback(query) {
 
   if (data === "kait_psc") {
     sessions.set(String(chatId), { mode: "awaiting_kait" });
+    const settings = await settingsStore.read();
     await sendMessage(
       chatId,
       [
         "<b>Format: email|password</b>",
-        `Min: ${settingsStore.read().minAccounts} akun`,
+        `Min: ${getMinOrderForChat(chatId, settings)} akun`,
         "",
         "Format lain seperti email:pass, email;pass, email pass akan otomatis di-convert.",
         "Hanya email GSuite/Google Workspace. Email gratis akan ditolak.",
@@ -834,12 +971,24 @@ async function handleCallback(query) {
   }
   if (data === "queue") return showQueue(chatId, from.id);
   if (data === "price_info") {
-    const settings = settingsStore.read();
-    await sendMessage(chatId, `Harga Kait PSC: ${formatRupiah(settings.pricePerAccount)} / akun.`);
+    const settings = await settingsStore.read();
+    await sendMessage(
+      chatId,
+      [
+        "🏷️ <b>DAFTAR HARGA LAYANAN</b> 🏷️",
+        "",
+        "Harga otomatis menyesuaikan jumlah akun yang Anda kirim:",
+        "",
+        renderPriceTiers(settings),
+        "",
+        `📌 Minimal order: <b>${getMinOrderAccounts(settings)} akun</b>`,
+      ].join("\n")
+    );
     return;
   }
   if (data === "help") {
-    await sendMessage(chatId, `Support: ${formatTelegramSupport(settingsStore.read().support)}`);
+    const settings = await settingsStore.read();
+    await sendMessage(chatId, `Support: ${formatTelegramSupport(settings.support)}`);
     return;
   }
   if (data.startsWith("checkpay_")) return checkAndUpdatePayment(chatId, data.replace("checkpay_", ""));
@@ -866,10 +1015,20 @@ async function poll() {
   }
 }
 
-registerBotCommands()
-  .then(() => log("bot commands registered"))
-  .catch((error) => console.error(`[bot] failed to register commands: ${error.message}`));
+async function main() {
+  await connectMongo();
+  log("MongoDB connected.");
 
-console.log("Telegram bot started.");
-setInterval(autoCheckPayments, Number(process.env.PAYMENT_CHECK_INTERVAL_MS || 15000));
-poll();
+  registerBotCommands()
+    .then(() => log("bot commands registered"))
+    .catch((error) => console.error(`[bot] failed to register commands: ${error.message}`));
+
+  console.log("Telegram bot started.");
+  setInterval(autoCheckPayments, Number(process.env.PAYMENT_CHECK_INTERVAL_MS || 15000));
+  poll();
+}
+
+main().catch((error) => {
+  console.error(`[bot] fatal: ${error.message}`);
+  process.exit(1);
+});

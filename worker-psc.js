@@ -4,13 +4,13 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 const axios = require("axios");
-const { JsonStore } = require("./lib/json-store");
+const { MongoStore, connectMongo } = require("./lib/mongo-store");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
 const DATA_DIR = path.join(__dirname, "data", "bot");
-const ordersStore = new JsonStore(path.join(DATA_DIR, "orders.json"), []);
-const usersStore = new JsonStore(path.join(DATA_DIR, "users.json"), {});
+const ordersStore = new MongoStore("orders", []);
+const usersStore = new MongoStore("users", {});
 const PYTHON_BIN = process.env.PYTHON_BIN || "python";
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 5000);
 let lastIdleLogAt = 0;
@@ -82,8 +82,8 @@ async function sendDocument(chatId, filePath, caption) {
   }
 }
 
-function updateOrder(orderId, patch) {
-  ordersStore.update((orders) =>
+async function updateOrder(orderId, patch) {
+  await ordersStore.update((orders) =>
     orders.map((order) =>
       String(order.id) === String(orderId)
         ? { ...order, ...patch, updatedAt: new Date().toISOString() }
@@ -141,13 +141,20 @@ function progressBarAscii(done, total) {
 }
 
 function renderProgress(order, phase, done, total, detail = "") {
-  const displayDone = Number.isInteger(done) ? done : Number(done || 0).toFixed(1);
+  const safeTotal = Math.max(1, Number(total || 0));
+  const doneNum = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  const percent = Math.floor((doneNum / safeTotal) * 100);
+  const segments = 20;
+  const filled = Math.round((percent / 100) * segments);
+  const bar = "█".repeat(filled) + "░".repeat(segments - filled);
+  const displayDone = Number.isInteger(done) ? done : doneNum.toFixed(1);
   return [
-    `<b>Progress Order #${order.id}</b>`,
+    `🔗 <b>Ngait Order #${order.id}</b>`,
+    `<i>${phase}</i>`,
     "",
-    progressBarAscii(done, total),
-    `${phase}: ${displayDone}/${total}`,
-    detail,
+    `<code>${bar}</code>`,
+    `<b>${percent}%</b> • ✅ ${displayDone}/${safeTotal} akun`,
+    detail ? `\n${detail}` : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -216,7 +223,7 @@ function runPscWorker(order, attempt, onProgress) {
 
 async function processOrder(order) {
   log(`picked order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts}`);
-  updateOrder(order.id, { status: "RUNNING", startedAt: new Date().toISOString() });
+  await updateOrder(order.id, { status: "RUNNING", startedAt: new Date().toISOString() });
   log(`order #${order.id} status RUNNING`);
   const initialProgress = await notify(
     order.telegramId,
@@ -239,7 +246,7 @@ async function processOrder(order) {
     const originalAccounts = readLines(originalInputFile);
     const totalAccounts = originalAccounts.length || Number(order.totalAccounts || 0);
     const accountProgress = new Map();
-    let nextProgressPercent = 20;
+    let nextProgressPercent = 10;
 
     const updateRealtimeProgress = async ({ email, percent, label }) => {
       accountProgress.set(email, percent);
@@ -260,7 +267,7 @@ async function processOrder(order) {
 
       const displayPercent = Math.min(100, Math.max(nextProgressPercent, overallPercent));
       const doneEquivalent = (displayPercent / 100) * totalAccounts;
-      while (nextProgressPercent <= displayPercent) nextProgressPercent += 20;
+      while (nextProgressPercent <= displayPercent) nextProgressPercent += 10;
 
       await editNotify(
         order.telegramId,
@@ -282,7 +289,7 @@ async function processOrder(order) {
       if (accountsToLink.length === 0) break;
 
       writeLines(remainingInputFile, accountsToLink);
-      updateOrder(order.id, {
+      await updateOrder(order.id, {
         phase: round === 1 ? "LINKING" : "RETRY_LINKING",
         retryRound: round,
         remainingCount: accountsToLink.length,
@@ -338,7 +345,7 @@ async function processOrder(order) {
         }
 
         lastRemainingCount = remainingCountAfterAttempt;
-        updateOrder(order.id, {
+        await updateOrder(order.id, {
           retryAttempt: attempt,
           linkedCount: successCountAfterAttempt,
           remainingCount: remainingCountAfterAttempt,
@@ -347,7 +354,7 @@ async function processOrder(order) {
 
       const successAfterRound = countLines(resultFile);
       const unverifiedCount = Math.max(0, totalAccounts - successAfterRound);
-      updateOrder(order.id, {
+      await updateOrder(order.id, {
         successCount: successAfterRound,
         remainingCount: unverifiedCount,
       });
@@ -377,7 +384,7 @@ async function processOrder(order) {
     const remainingUnverifiedFile = path.join(order.orderPath, "remaining-unverified.txt");
     writeLines(remainingUnverifiedFile, remainingUnverified);
 
-    updateOrder(order.id, {
+    await updateOrder(order.id, {
       status: "DONE",
       phase: "DONE",
       successCount,
@@ -402,7 +409,7 @@ async function processOrder(order) {
       )
     );
 
-    usersStore.update((users) => {
+    await usersStore.update((users) => {
       const user = users[order.telegramId];
       if (user) {
         user.totalKait = Number(user.totalKait || 0) + successCount;
@@ -433,7 +440,7 @@ async function processOrder(order) {
     }
   } catch (error) {
     log(`order #${order.id} FAILED ${error.message}`);
-    updateOrder(order.id, {
+    await updateOrder(order.id, {
       status: "FAILED",
       error: error.message,
       finishedAt: new Date().toISOString(),
@@ -443,9 +450,11 @@ async function processOrder(order) {
 }
 
 async function loop() {
+  await connectMongo();
+  log("MongoDB connected.");
   log("PSC worker started.");
   while (true) {
-    const orders = ordersStore.read();
+    const orders = await ordersStore.read();
     const order = orders.find((item) => item.status === "QUEUED" || item.status === "PAID");
     if (!order) {
       const now = Date.now();
