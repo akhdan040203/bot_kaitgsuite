@@ -409,14 +409,40 @@ async function processOrder(order) {
       )
     );
 
+    let bonusGranted = 0;
+    let bonusMilestoneReached = 0;
     await usersStore.update((users) => {
       const user = users[order.telegramId];
       if (user) {
         user.totalKait = Number(user.totalKait || 0) + successCount;
         user.totalSpend = Number(user.totalSpend || 0) + Number(order.totalPrice || 0);
+        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +50 free ngait akun.
+        const step = Number(process.env.BONUS_MILESTONE_STEP || 1000);
+        const perMilestone = Number(process.env.BONUS_FREE_PER_1000 || 50);
+        const before = Number(user.bonusMilestone || 0);
+        const reached = Math.floor(user.totalKait / step) * step;
+        if (reached > before) {
+          const crossed = (reached - before) / step;
+          bonusGranted = crossed * perMilestone;
+          user.freeAccountBalance = Number(user.freeAccountBalance || 0) + bonusGranted;
+          user.bonusMilestone = reached;
+          bonusMilestoneReached = reached;
+        }
       }
       return users;
     });
+    if (bonusGranted > 0) {
+      await notify(
+        order.telegramId,
+        [
+          "🎉 <b>Selamat! Bonus Loyalitas</b>",
+          "",
+          `Kamu sudah ngait ${bonusMilestoneReached}+ akun!`,
+          `🎁 Bonus: <b>${bonusGranted} free ngait akun</b> ditambahkan.`,
+          "Akun gratis otomatis dipakai di order berikutnya.",
+        ].join("\n")
+      );
+    }
 
     await notify(
       order.telegramId,
