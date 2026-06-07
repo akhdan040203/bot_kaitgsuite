@@ -909,6 +909,7 @@ async function handleAdminCommand(chatId, text) {
         "/voucher  (kelola voucher diskon)",
         "/orders",
         "/paid ORDER_ID",
+        "/batalproses ORDER_ID",
         "/broadcast pesan",
         "/pause",
         "/resume",
@@ -1092,6 +1093,33 @@ async function handleAdminCommand(chatId, text) {
     );
     await consumeOrderBenefits(orderId);
     await sendMessage(chatId, `Order #${orderId} ditandai paid dan masuk antrian.`);
+    return true;
+  }
+
+  if (command === "/batalproses" || command === "/stopproses" || command === "/stop") {
+    const orderId = args[0];
+    if (!orderId) {
+      await sendMessage(chatId, "Format: /batalproses ORDER_ID");
+      return true;
+    }
+    let target = null;
+    await ordersStore.update((orders) =>
+      orders.map((order) => {
+        if (String(order.id) === String(orderId) && ["QUEUED", "RUNNING", "PAID"].includes(order.status)) {
+          target = order;
+          return { ...order, status: "CANCELLED", cancelledByAdmin: true, cancelledAt: new Date().toISOString() };
+        }
+        return order;
+      })
+    );
+    if (!target) {
+      await sendMessage(chatId, `Order #${orderId} tidak bisa dibatalkan (tidak sedang antri/proses).`);
+      return true;
+    }
+    await sendMessage(chatId, `🛑 Order #${orderId} dibatalkan. Worker akan menghentikan prosesnya sebentar lagi.`);
+    try {
+      await sendMessage(target.telegramId, `Order #${orderId} dibatalkan oleh admin.`);
+    } catch (_) {}
     return true;
   }
 

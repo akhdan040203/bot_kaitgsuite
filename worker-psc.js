@@ -96,6 +96,23 @@ async function updateOrder(orderId, patch) {
   );
 }
 
+// True kalau order sudah dibatalkan admin (atau hilang dari DB).
+async function isOrderCancelled(orderId) {
+  const orders = await ordersStore.read();
+  const o = orders.find((x) => String(x.id) === String(orderId));
+  return !o || o.status === "CANCELLED" || o.stopRequested === true;
+}
+
+function killChildTree(child) {
+  try {
+    if (process.platform === "win32") {
+      require("child_process").exec(`taskkill /pid ${child.pid} /T /F`);
+    } else {
+      child.kill("SIGTERM");
+    }
+  } catch (_) {}
+}
+
 function countLines(filePath) {
   if (!fs.existsSync(filePath)) return 0;
   return fs
@@ -184,6 +201,20 @@ function runPscWorker(order, attempt, onProgress) {
     log(`attempt ${attempt}: spawning: ${PYTHON_BIN} ${args.join(" ")}`);
     const child = spawn(PYTHON_BIN, args, { cwd: __dirname, windowsHide: true });
     let stdoutBuffer = "";
+    let stopped = false;
+
+    // Cek berkala: kalau admin membatalkan order, hentikan proses python.
+    const cancelPoll = setInterval(() => {
+      isOrderCancelled(order.id)
+        .then((cancelled) => {
+          if (cancelled && !stopped) {
+            stopped = true;
+            log(`order #${order.id} dibatalkan admin -> hentikan proses ngait`);
+            killChildTree(child);
+          }
+        })
+        .catch(() => {});
+    }, Number(process.env.CANCEL_POLL_MS || 4000));
 
     function handleProgressChunk(chunk) {
       stdoutBuffer += chunk.toString();
@@ -211,11 +242,17 @@ function runPscWorker(order, attempt, onProgress) {
       process.stderr.write(chunk);
     });
     child.on("error", (error) => {
+      clearInterval(cancelPoll);
       log(`spawn error: ${error.message}`);
       reject(error);
     });
     child.on("close", (code) => {
+      clearInterval(cancelPoll);
       log(`attempt ${attempt}: mumu-psc.py exited with code ${code}`);
+      if (stopped) {
+        resolve({ resultFile, logFile, stopped: true });
+        return;
+      }
       if (code !== 0) {
         reject(new Error(`mumu-psc.py exited with code ${code}`));
         return;
@@ -297,6 +334,7 @@ async function processOrder(order) {
     };
 
     for (let round = 1; round <= maxRetryRounds; round++) {
+      if (await isOrderCancelled(order.id)) break;
       const successBeforeRound = countLines(resultFile);
       const accountsToLink = subtractLines(originalAccounts, [
         ...readLines(resultFile),
@@ -328,15 +366,20 @@ async function processOrder(order) {
 
       // Satu pass per round: mumu-psc.py memproses SELURUH akun sisa (input.txt) sekali jalan.
       // Round 1 = semua akun; round berikutnya = hanya yang masih gagal. Maks maxRetryRounds round.
+      let stoppedThisRound = false;
       try {
-        ({ resultFile, logFile } = await runPscWorker(order, `${round}`, (progress) => {
+        const r = await runPscWorker(order, `${round}`, (progress) => {
           updateRealtimeProgress(progress).catch((error) => {
             console.error(`[progress] ${error.message}`);
           });
-        }));
+        });
+        resultFile = r.resultFile;
+        logFile = r.logFile;
+        stoppedThisRound = Boolean(r.stopped);
       } catch (error) {
         log(`order #${order.id} round ${round} worker error: ${error.message}`);
       }
+      if (stoppedThisRound || (await isOrderCancelled(order.id))) break;
 
       const successAfterRound = countLines(resultFile);
       const notRegisteredCountRound = countLines(notRegisteredFile);
@@ -362,6 +405,33 @@ async function processOrder(order) {
       if (successAfterRound <= successBeforeRound) {
         log(`order #${order.id} no success progress on round ${round}, retrying remaining accounts if retry rounds are left`);
       }
+    }
+
+    // Kalau dibatalkan admin di tengah jalan -> tutup sebagai CANCELLED, bukan DONE.
+    if (await isOrderCancelled(order.id)) {
+      const successCancel = countLines(resultFile);
+      await updateOrder(order.id, {
+        status: "CANCELLED",
+        successCount: successCancel,
+        finishedAt: new Date().toISOString(),
+        cancelledByAdmin: true,
+      });
+      log(`order #${order.id} DIBATALKAN admin. success=${successCancel}/${totalAccounts}`);
+      await editNotify(
+        order.telegramId,
+        progressMessageId,
+        `❌ <b>Order #${order.id} dibatalkan admin.</b>\nBerhasil ngait: ${successCancel}/${totalAccounts}`
+      );
+      if (successCancel > 0) {
+        await sendDocument(order.telegramId, resultFile, `Hasil sebagian order #${order.id} (dibatalkan admin)`);
+      }
+      for (const adminId of ADMIN_IDS) {
+        if (String(adminId) === String(order.telegramId)) continue;
+        await notify(adminId, `[ADMIN] Order #${order.id} dibatalkan. Berhasil: ${successCancel}/${totalAccounts}`);
+      }
+      await deleteNotify(order.telegramId, progressMessageId);
+      if (order.queueMessageId) await deleteNotify(order.telegramId, order.queueMessageId);
+      return;
     }
 
     const successCount = countLines(resultFile);
