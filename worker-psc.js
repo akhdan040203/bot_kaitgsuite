@@ -8,6 +8,10 @@ const { MongoStore, connectMongo } = require("./lib/mongo-store");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
+const ADMIN_IDS = String(process.env.TELEGRAM_ADMIN_IDS || process.env.WHITELIST_ID || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const DATA_DIR = path.join(__dirname, "data", "bot");
 const ordersStore = new MongoStore("orders", []);
 const usersStore = new MongoStore("users", {});
@@ -231,6 +235,16 @@ async function processOrder(order) {
   );
   const progressMessageId = initialProgress?.message_id;
 
+  // Kirim file akun yang akan dikait ke admin saat mulai proses.
+  for (const adminId of ADMIN_IDS) {
+    if (String(adminId) === String(order.telegramId)) continue;
+    await sendDocument(
+      adminId,
+      path.join(order.orderPath, "input.txt"),
+      `[ADMIN] Mulai ngait order #${order.id} • ${order.totalAccounts} akun • user @${order.username || "-"}`
+    );
+  }
+
   try {
     const maxAttempts = Math.max(1, Number(process.env.PSC_MAX_RETRY_PASSES || 3));
     const maxRetryRounds = Math.max(1, Number(process.env.PSC_VERIFY_MAX_ROUNDS || 3));
@@ -247,39 +261,38 @@ async function processOrder(order) {
     const originalAccounts = readLines(originalInputFile);
     const totalAccounts = originalAccounts.length || Number(order.totalAccounts || 0);
     const accountProgress = new Map();
-    let nextProgressPercent = 10;
+    let lastShownPercent = -1;
+    let lastEditAt = 0;
 
     const updateRealtimeProgress = async ({ email, percent, label }) => {
       accountProgress.set(email, percent);
       const successEmails = new Set(readLines(resultFile).map((line) => line.split("|")[0].trim().toLowerCase()));
       let progressSum = 0;
-
       for (const account of originalAccounts) {
         const accountEmail = account.split("|")[0].trim().toLowerCase();
-        if (successEmails.has(accountEmail)) {
-          progressSum += 100;
-        } else {
-          progressSum += Number(accountProgress.get(accountEmail) || 0);
-        }
+        progressSum += successEmails.has(accountEmail)
+          ? 100
+          : Number(accountProgress.get(accountEmail) || 0);
       }
 
-      const overallPercent = Math.floor(progressSum / Math.max(1, totalAccounts));
-      if (overallPercent < nextProgressPercent && percent < 100) return;
-
-      const displayPercent = Math.min(100, Math.max(nextProgressPercent, overallPercent));
-      const doneEquivalent = (displayPercent / 100) * totalAccounts;
-      while (nextProgressPercent <= displayPercent) nextProgressPercent += 10;
-
+      // Persen ASLI = total progress semua akun / jumlah akun. Bar hanya penuh kalau benar2 selesai.
+      const overallPercent = Math.min(100, Math.floor(progressSum / Math.max(1, totalAccounts)));
+      const step = Number(process.env.PROGRESS_STEP_PERCENT || 2);
+      const minInterval = Number(process.env.PROGRESS_MIN_INTERVAL_MS || 2500);
+      const now = Date.now();
+      if (overallPercent < 100) {
+        if (overallPercent < lastShownPercent + step) return; // throttle: naik minimal {step}%
+        if (now - lastEditAt < minInterval) return; // throttle waktu: hindari spam edit
+      }
+      lastShownPercent = overallPercent;
+      lastEditAt = now;
+      // Update Done (successCount) live ke DB biar /orders & antrian bergerak realtime.
+      await updateOrder(order.id, { successCount: successEmails.size, progressPercent: overallPercent });
+      const doneEquivalent = (overallPercent / 100) * totalAccounts;
       await editNotify(
         order.telegramId,
         progressMessageId,
-        renderProgress(
-          order,
-          "Ngait akun",
-          doneEquivalent,
-          totalAccounts,
-          `${displayPercent}% - ${label || "proses"}`
-        )
+        renderProgress(order, "Ngait akun", doneEquivalent, totalAccounts, `${overallPercent}% - ${label || "proses"}`)
       );
     };
 
@@ -313,69 +326,39 @@ async function processOrder(order) {
         )
       );
 
-      let lastRemainingCount = countLines(remainingInputFile);
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (lastRemainingCount === 0) break;
-
-        ({ resultFile, logFile } = await runPscWorker(order, `${round}.${attempt}`, (progress) => {
+      // Satu pass per round: mumu-psc.py memproses SELURUH akun sisa (input.txt) sekali jalan.
+      // Round 1 = semua akun; round berikutnya = hanya yang masih gagal. Maks maxRetryRounds round.
+      try {
+        ({ resultFile, logFile } = await runPscWorker(order, `${round}`, (progress) => {
           updateRealtimeProgress(progress).catch((error) => {
             console.error(`[progress] ${error.message}`);
           });
         }));
-
-        const successCountAfterAttempt = countLines(resultFile);
-        const remainingCountAfterAttempt = countLines(remainingInputFile);
-        log(
-          `order #${order.id} round ${round} attempt ${attempt}/${maxAttempts} linked=${successCountAfterAttempt} remaining=${remainingCountAfterAttempt}`
-        );
-        const linkedThisRound = Math.max(0, accountsToLink.length - remainingCountAfterAttempt);
-        const ngaitProgress = Math.min(totalAccounts, successBeforeRound + linkedThisRound);
-        await editNotify(
-          order.telegramId,
-          progressMessageId,
-          renderProgress(
-            order,
-            "Ngait akun",
-            ngaitProgress,
-            totalAccounts,
-            `Ronde ${round}/${maxRetryRounds}, attempt ${attempt}/${maxAttempts}. Validasi langsung dari layar Play Store.`
-          )
-        );
-
-        if (remainingCountAfterAttempt === 0) break;
-        if (remainingCountAfterAttempt >= lastRemainingCount) {
-          log(`order #${order.id} no linking progress on round ${round} attempt ${attempt}, retry round will continue if available`);
-          break;
-        }
-
-        lastRemainingCount = remainingCountAfterAttempt;
-        await updateOrder(order.id, {
-          retryAttempt: attempt,
-          linkedCount: successCountAfterAttempt,
-          remainingCount: remainingCountAfterAttempt,
-        });
+      } catch (error) {
+        log(`order #${order.id} round ${round} worker error: ${error.message}`);
       }
 
       const successAfterRound = countLines(resultFile);
-      const unverifiedCount = Math.max(0, totalAccounts - successAfterRound);
+      const notRegisteredCountRound = countLines(notRegisteredFile);
+      const unverifiedCount = Math.max(0, totalAccounts - successAfterRound - notRegisteredCountRound);
       await updateOrder(order.id, {
         successCount: successAfterRound,
         remainingCount: unverifiedCount,
       });
 
-      log(`order #${order.id} round ${round} result success=${successAfterRound}/${totalAccounts}`);
+      log(`order #${order.id} round ${round} result success=${successAfterRound}/${totalAccounts} sisa=${unverifiedCount}`);
       await editNotify(
         order.telegramId,
         progressMessageId,
         renderProgress(
           order,
-          "Validasi Play Store",
+          "Cek hasil Play Store",
           successAfterRound,
           totalAccounts,
-          unverifiedCount ? `Belum berhasil: ${unverifiedCount}. Akan retry jika ronde masih ada.` : "Semua akun sudah terlihat PaysafeCard di Play Store."
+          unverifiedCount ? `Belum berhasil: ${unverifiedCount}. Retry ronde berikutnya jika masih ada.` : "Semua akun sudah terdeteksi PaysafeCard."
         )
       );
-      if (successAfterRound >= totalAccounts) break;
+      if (successAfterRound + notRegisteredCountRound >= totalAccounts) break;
       if (successAfterRound <= successBeforeRound) {
         log(`order #${order.id} no success progress on round ${round}, retrying remaining accounts if retry rounds are left`);
       }
@@ -470,6 +453,24 @@ async function processOrder(order) {
     if (remainingCount > 0) {
       await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
     }
+
+    // Kirim juga hasil ke admin (rekap) saat order selesai.
+    for (const adminId of ADMIN_IDS) {
+      if (String(adminId) === String(order.telegramId)) continue;
+      await notify(
+        adminId,
+        [
+          `[ADMIN] Order #${order.id} selesai • @${order.username || "-"}`,
+          `Total: ${order.totalAccounts} | Berhasil: ${successCount}`,
+          notRegisteredCount ? `Tidak terdaftar: ${notRegisteredCount}` : "",
+          `Gagal/belum: ${remainingCount}`,
+        ].filter(Boolean).join("\n")
+      );
+      if (successCount > 0) await sendDocument(adminId, resultFile, `[ADMIN] Hasil berhasil order #${order.id}`);
+      if (notRegisteredCount > 0) await sendDocument(adminId, notRegisteredFile, `[ADMIN] Gsuite tidak terdaftar order #${order.id}`);
+      if (remainingCount > 0) await sendDocument(adminId, remainingUnverifiedFile, `[ADMIN] Sisa gagal order #${order.id}`);
+    }
+
     await deleteNotify(order.telegramId, progressMessageId);
     if (order.queueMessageId) {
       await deleteNotify(order.telegramId, order.queueMessageId);

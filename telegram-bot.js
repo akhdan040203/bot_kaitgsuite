@@ -291,6 +291,16 @@ function statusIcon(status) {
   );
 }
 
+// Bar mini dari jumlah akun yang sukses ngait.
+function miniBar(done, total) {
+  const t = Math.max(1, Number(total || 0));
+  const d = Math.min(t, Math.max(0, Number(done || 0)));
+  const percent = Math.floor((d / t) * 100);
+  const seg = 10;
+  const filled = Math.round((percent / 100) * seg);
+  return `[${"▰".repeat(filled)}${"▱".repeat(seg - filled)}] ${percent}%`;
+}
+
 async function deleteMessage(chatId, messageId) {
   if (!chatId || !messageId) return;
   try {
@@ -739,6 +749,7 @@ async function showQueue(chatId, telegramId) {
               return [
                 `${index + 1}. ${statusIcon} <b>${order.status}</b>`,
                 `   📧 ${processedCount}/${order.totalAccounts} gsuite`,
+                `   <code>${miniBar(processedCount, order.totalAccounts)}</code>`,
                 `   🆔 <code>${order.id}</code>`,
               ].join("\n");
             })
@@ -1054,6 +1065,7 @@ async function handleAdminCommand(chatId, text) {
               `🆔 <code>${order.id}</code>`,
               `   👤 ${order.username ? "@" + order.username : order.telegramId}`,
               `   📦 Order: ${order.totalAccounts} akun  |  ✅ Done: ${order.successCount || 0}/${order.totalAccounts}`,
+              `   <code>${miniBar(order.successCount || 0, order.totalAccounts)}</code>`,
               `   💰 ${formatRupiah(order.totalPrice)}  |  ${statusIcon(order.status)} ${order.status}${queueText}`,
             ].join("\n");
           })

@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import re
 import argparse
+import subprocess
 
 INPUT_FILE = "gsuite.txt"
 RESULT_FILE = "Hasil-Gdoku.txt"
@@ -27,6 +28,52 @@ def action_timeout(seconds):
 
 def pause(seconds):
     time.sleep(float(seconds) * SLEEP_MULTIPLIER)
+
+# ====== Auto-switch VPN ExpressVPN (dipakai saat Play Store gagal terus) ======
+VPN_UK_LOCATIONS = [
+    loc.strip()
+    for loc in os.getenv(
+        "VPN_UK_LOCATIONS",
+        "UK - London,UK - East London,UK - Wembley,UK - Docklands,UK - Midlands",
+    ).split(",")
+    if loc.strip()
+]
+# Perintah switch VPN; {location} diganti nama lokasi. Default pakai CLI ExpressVPN.
+# Bisa di-override di .env (mis. pakai script/PowerShell sendiri).
+VPN_SWITCH_CMD = os.getenv("VPN_SWITCH_CMD", 'expressvpn connect "{location}"')
+VPN_DISCONNECT_CMD = os.getenv("VPN_DISCONNECT_CMD", "expressvpn disconnect")
+VPN_SWITCH_WAIT = int(os.getenv("VPN_SWITCH_WAIT", "10"))
+
+_vpn_lock = threading.Lock()
+_vpn_index = 0
+
+
+def switch_vpn_uk(logger=print):
+    """Ganti ExpressVPN ke lokasi UK berikutnya (rotasi). Return True kalau sukses."""
+    global _vpn_index
+    if not VPN_UK_LOCATIONS:
+        logger("VPN_UK_LOCATIONS kosong, lewati switch VPN")
+        return False
+    with _vpn_lock:
+        location = VPN_UK_LOCATIONS[_vpn_index % len(VPN_UK_LOCATIONS)]
+        _vpn_index += 1
+    try:
+        logger(f"Ganti VPN ExpressVPN -> {location}")
+        if VPN_DISCONNECT_CMD:
+            try:
+                subprocess.run(VPN_DISCONNECT_CMD, shell=True, timeout=60, capture_output=True, text=True)
+            except Exception as e:
+                logger(f"VPN disconnect gagal (lanjut): {e}")
+            time.sleep(2)
+        cmd = VPN_SWITCH_CMD.replace("{location}", location)
+        result = subprocess.run(cmd, shell=True, timeout=120, capture_output=True, text=True)
+        out = (result.stdout or result.stderr or "").strip()[:200]
+        logger(f"VPN connect rc={result.returncode} {out}")
+        time.sleep(VPN_SWITCH_WAIT)
+        return result.returncode == 0
+    except Exception as e:
+        logger(f"Gagal switch VPN: {e}")
+        return False
 
 class EmulatorAutomator:
     def __init__(self, port, name):
@@ -592,6 +639,57 @@ class EmulatorAutomator:
             self.log_error(f"Error removing account {email}: {e}")
             return False
 
+    def open_play_store_with_retry(self, email):
+        """Buka Play Store; kalau muncul error 'Try again' -> klik untuk coba lagi.
+        Kalau setelah beberapa kali tetap gagal -> ganti VPN ExpressVPN ke lokasi UK
+        lain lalu return False (akun akan di-retry worker dengan IP baru)."""
+        tries = int(os.getenv("PSC_PLAYSTORE_TRIES", "3"))
+        error_markers = [
+            "Try again", "TRY AGAIN", "Retry", "Coba lagi", "COBA LAGI",
+            "Something went wrong", "Terjadi kesalahan",
+            "No connection", "Couldn't connect", "Tidak ada koneksi",
+        ]
+        for attempt in range(1, tries + 1):
+            self.device.press("home")
+            self.device.app_start("com.android.vending")
+            deadline = time.time() + action_timeout(8)
+            store_ready = False
+            while time.time() < deadline:
+                if (self.device(resourceId="com.android.vending:id/account_menu_item").exists(timeout=0)
+                        or self.device(descriptionContains="Account").exists(timeout=0)
+                        or self.device(text="Games").exists(timeout=0)
+                        or self.device(text="For you").exists(timeout=0)):
+                    store_ready = True
+                    break
+                # Deteksi & klik tombol "Try again"/error koneksi.
+                clicked = False
+                for marker in error_markers:
+                    try:
+                        sel = self.device(textContains=marker)
+                        if sel.exists(timeout=0):
+                            self.log_warn(f"Play Store error '{marker}' (attempt {attempt}), klik coba lagi")
+                            sel.click_exists(timeout=action_timeout(1))
+                            clicked = True
+                            pause(2)
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    pause(0.4)
+            if store_ready:
+                self.log_info(f"Play Store siap (attempt {attempt})")
+                return True
+            self.log_warn(f"Play Store belum siap (attempt {attempt}/{tries})")
+            try:
+                self.device.app_stop("com.android.vending")
+                pause(1)
+            except Exception:
+                pass
+        # Gagal setelah semua attempt -> auto-replace VPN ke lokasi UK lain.
+        self.log_warn(f"Play Store gagal {tries}x untuk {email}, AUTO-REPLACE VPN ExpressVPN (UK lokasi lain)")
+        switch_vpn_uk(self.log_warn)
+        return False
+
     def fast_process_account(self, email, password, psc_email, psc_pass):
         try:
             self.log_info(f"====== STARTING NEW ACCOUNT PROCESS ======")
@@ -614,23 +712,12 @@ class EmulatorAutomator:
                 return False
             self.emit_progress(email, 20, "login google berhasil")
 
-            # Quick Play Store launch (smart-wait, bukan jeda buta)
-            self.device.press("home")
-            self.device.app_start("com.android.vending")
-            # Tunggu sampai Play Store siap: cek semua penanda beranda barengan tiap 0.4s,
-            # langsung lanjut begitu salah satu muncul (cepat, tidak nunggu buta).
-            store_ready = False
-            deadline = time.time() + action_timeout(8)
-            while time.time() < deadline:
-                if (self.device(resourceId="com.android.vending:id/account_menu_item").exists(timeout=0)
-                        or self.device(descriptionContains="Account").exists(timeout=0)
-                        or self.device(text="Games").exists(timeout=0)
-                        or self.device(text="For you").exists(timeout=0)):
-                    store_ready = True
-                    break
-                pause(0.4)
-            if not store_ready:
-                self.log_warn("Play Store belum tampil menu utama, lanjut dengan fallback")
+            # Buka Play Store dengan retry + klik "Try again". Kalau 3x gagal -> ganti VPN
+            # ExpressVPN ke lokasi UK lain, lalu akun ini di-retry worker dengan IP baru.
+            if not self.open_play_store_with_retry(email):
+                self.log_error(f"Play Store tidak bisa dibuka untuk {email} (VPN sudah diganti), hapus akun & retry")
+                self.fast_remove_google_account(email)
+                return False
             self.emit_progress(email, 30, "buka play store")
 
             # Fast popup handling
