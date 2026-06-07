@@ -475,6 +475,11 @@ async function processOrder(order) {
       if (user) {
         user.totalKait = Number(user.totalKait || 0) + successCount;
         user.totalSpend = Number(user.totalSpend || 0) + Number(order.totalPrice || 0);
+        // Kompensasi: akun yang gagal (setelah semua retry) jadi saldo free ngait,
+        // bisa dipakai user lagi GRATIS untuk ngait berikutnya.
+        if (remainingCount > 0) {
+          user.freeAccountBalance = Number(user.freeAccountBalance || 0) + remainingCount;
+        }
         // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +50 free ngait akun.
         const step = Number(process.env.BONUS_MILESTONE_STEP || 1000);
         const perMilestone = Number(process.env.BONUS_FREE_PER_1000 || 50);
@@ -512,6 +517,9 @@ async function processOrder(order) {
         `Berhasil: ${successCount}`,
         notRegisteredCount ? `Gsuite tidak terdaftar: ${notRegisteredCount}` : "",
         `Gagal/belum berhasil: ${remainingCount}`,
+        remainingCount
+          ? `\n🎁 ${remainingCount} akun gagal dikreditkan jadi saldo free ngait — bisa dipakai lagi GRATIS untuk order berikutnya.`
+          : "",
       ].filter(Boolean).join("\n")
     );
     if (successCount > 0) {

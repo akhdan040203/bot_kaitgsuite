@@ -910,6 +910,7 @@ async function handleAdminCommand(chatId, text) {
         "/orders",
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
+        "/addsaldo USER_ID JUMLAH",
         "/broadcast pesan",
         "/pause",
         "/resume",
@@ -1017,6 +1018,46 @@ async function handleAdminCommand(chatId, text) {
     const clean = value.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "");
     await settingsStore.update((settings) => ({ ...settings, support: clean }));
     await sendMessage(chatId, `Support diubah ke: ${formatTelegramSupport(clean)}`);
+    return true;
+  }
+
+  if (command === "/addsaldo" || command === "/setsaldo") {
+    const targetId = String(args[0] || "").trim();
+    const amount = Number(args[1]);
+    if (!targetId || !Number.isFinite(amount)) {
+      await sendMessage(
+        chatId,
+        [
+          "Format:",
+          "/addsaldo USER_ID JUMLAH   (tambah/kurang saldo, mis. 50 atau -10)",
+          "/setsaldo USER_ID JUMLAH   (set saldo jadi nilai pasti)",
+          "Contoh: /addsaldo 7455452803 50",
+        ].join("\n")
+      );
+      return true;
+    }
+    let found = false;
+    let newBalance = 0;
+    await usersStore.update((users) => {
+      if (users[targetId]) {
+        found = true;
+        const current = Number(users[targetId].freeAccountBalance || 0);
+        newBalance = Math.max(0, command === "/setsaldo" ? amount : current + amount);
+        users[targetId].freeAccountBalance = newBalance;
+      }
+      return users;
+    });
+    if (!found) {
+      await sendMessage(chatId, `User ${targetId} belum terdaftar (user harus pernah /start dulu).`);
+      return true;
+    }
+    await sendMessage(
+      chatId,
+      `✅ Saldo free ngait user <code>${targetId}</code> sekarang: <b>${newBalance} akun</b>.`
+    );
+    try {
+      await sendMessage(targetId, `🎁 Saldo free ngait kamu diperbarui admin. Sekarang: <b>${newBalance} akun</b> (bisa dipakai gratis untuk ngait).`);
+    } catch (_) {}
     return true;
   }
 
