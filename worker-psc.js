@@ -28,14 +28,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function notify(chatId, text) {
+function rp(value) {
+  return `Rp ${Number(value || 0).toLocaleString("id-ID")}`;
+}
+
+async function notify(chatId, text, replyMarkup) {
   if (!API || !chatId) return;
   try {
-    const { data } = await axios.post(
-      `${API}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: "HTML" },
-      { timeout: 30000 }
-    );
+    const payload = { chat_id: chatId, text, parse_mode: "HTML" };
+    if (replyMarkup) payload.reply_markup = replyMarkup;
+    const { data } = await axios.post(`${API}/sendMessage`, payload, { timeout: 30000 });
     return data.result;
   } catch (error) {
     console.error(`[notify] ${error.message}`);
@@ -468,6 +470,12 @@ async function processOrder(order) {
       )
     );
 
+    // Refund proporsional: dihitung dari yang BENAR-BENAR dibayar (subtotal - diskon voucher),
+    // dibagi rata per akun. Jadi kalau 50% gagal -> refund 50% dari yang dibayar.
+    const paidForAccounts = Math.max(0, Number(order.basePrice || 0) - Number(order.voucherDiscount || 0));
+    const refundAmount = remainingCount > 0
+      ? Math.round((paidForAccounts * remainingCount) / Math.max(1, totalAccounts))
+      : 0;
     let bonusGranted = 0;
     let bonusMilestoneReached = 0;
     await usersStore.update((users) => {
@@ -475,20 +483,19 @@ async function processOrder(order) {
       if (user) {
         user.totalKait = Number(user.totalKait || 0) + successCount;
         user.totalSpend = Number(user.totalSpend || 0) + Number(order.totalPrice || 0);
-        // Kompensasi: akun yang gagal (setelah semua retry) jadi saldo free ngait,
-        // bisa dipakai user lagi GRATIS untuk ngait berikutnya.
-        if (remainingCount > 0) {
-          user.freeAccountBalance = Number(user.freeAccountBalance || 0) + remainingCount;
+        // Auto-refund akun gagal (setelah semua retry) -> saldo (Rupiah).
+        if (refundAmount > 0) {
+          user.balance = Number(user.balance || 0) + refundAmount;
         }
-        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +50 free ngait akun.
+        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +bonus Rupiah ke saldo.
         const step = Number(process.env.BONUS_MILESTONE_STEP || 1000);
-        const perMilestone = Number(process.env.BONUS_FREE_PER_1000 || 50);
+        const perMilestone = Number(process.env.BONUS_RUPIAH_PER_1000 || 10000);
         const before = Number(user.bonusMilestone || 0);
         const reached = Math.floor(user.totalKait / step) * step;
         if (reached > before) {
           const crossed = (reached - before) / step;
           bonusGranted = crossed * perMilestone;
-          user.freeAccountBalance = Number(user.freeAccountBalance || 0) + bonusGranted;
+          user.balance = Number(user.balance || 0) + bonusGranted;
           user.bonusMilestone = reached;
           bonusMilestoneReached = reached;
         }
@@ -502,8 +509,8 @@ async function processOrder(order) {
           "🎉 <b>Selamat! Bonus Loyalitas</b>",
           "",
           `Kamu sudah ngait ${bonusMilestoneReached}+ akun!`,
-          `🎁 Bonus: <b>${bonusGranted} free ngait akun</b> ditambahkan.`,
-          "Akun gratis otomatis dipakai di order berikutnya.",
+          `🎁 Bonus saldo: <b>${rp(bonusGranted)}</b> ditambahkan.`,
+          "Saldo otomatis dipakai untuk bayar order berikutnya.",
         ].join("\n")
       );
     }
@@ -517,8 +524,8 @@ async function processOrder(order) {
         `Berhasil: ${successCount}`,
         notRegisteredCount ? `Gsuite tidak terdaftar: ${notRegisteredCount}` : "",
         `Gagal/belum berhasil: ${remainingCount}`,
-        remainingCount
-          ? `\n🎁 ${remainingCount} akun gagal dikreditkan jadi saldo free ngait — bisa dipakai lagi GRATIS untuk order berikutnya.`
+        refundAmount
+          ? `\n💰 ${remainingCount} akun gagal → auto-refund ${rp(refundAmount)} ke saldo (bisa dipakai untuk order berikutnya).`
           : "",
       ].filter(Boolean).join("\n")
     );
@@ -530,6 +537,11 @@ async function processOrder(order) {
     }
     if (remainingCount > 0) {
       await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
+      await notify(
+        order.telegramId,
+        `🔁 Mau ngait ulang <b>${remainingCount} akun gagal</b> pakai saldo kamu?`,
+        { inline_keyboard: [[{ text: `🔁 Retry ${remainingCount} akun (pakai saldo)`, callback_data: `retry_${order.id}` }]] }
+      );
     }
 
     // Kirim juga hasil ke admin (rekap) saat order selesai.
