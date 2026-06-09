@@ -133,6 +133,16 @@ class EmulatorAutomator:
             self.log_error(f"Reconnect emulator {self.port} gagal setelah beberapa percobaan")
             return False
 
+    def close_notification_shade(self):
+        """Tutup panel notifikasi/quick settings kalau kebuka (mis. notif VPN ExpressVPN)."""
+        try:
+            self.device.shell("cmd statusbar collapse")
+        except Exception:
+            try:
+                self.device.press("back")
+            except Exception:
+                pass
+
     def fast_click_text(self, text_list, timeout=3):
         """Text clicking with configurable timeout for slower RDP/emulator sessions"""
         for text in text_list:
@@ -413,15 +423,52 @@ class EmulatorAutomator:
             pause(1.5)
             self.dismiss_crash_dialogs()
 
+            # Isi EMAIL dengan FOKUS + VERIFIKASI + RETRY (sama seperti password).
+            # Termasuk retry kalau muncul error "Enter an email or phone number" (field kosong).
             self.log_info(f"Input Google email: {email}")
-            if not self.set_text_fast(email, timeout=5, className="android.widget.EditText"):
-                self.log_error("Cannot find Google email input")
+            email_ok = False
+            for email_try in range(1, 4):
+                self.close_notification_shade()
+                email_field = self.device(className="android.widget.EditText")
+                if not email_field.exists(timeout=action_timeout(6)):
+                    self.log_error("Cannot find Google email input")
+                    return False
+                try:
+                    email_field.click()
+                    pause(0.2)
+                    email_field.set_text(email)
+                except Exception as e:
+                    self.log_warn(f"Isi email gagal (try {email_try}): {e}")
+                pause(0.4)
+                try:
+                    current = (self.device(className="android.widget.EditText").info or {}).get("text", "") or ""
+                except Exception:
+                    current = ""
+                if "@" not in current:
+                    self.log_warn(f"Email field belum benar ('{current}'), ulangi (try {email_try})")
+                    continue
+                if not self.click_google_next("Email step"):
+                    self.log_error("Cannot click NEXT after email input")
+                    return False
+                self.dismiss_crash_dialogs()
+                pause(1)
+                # Cek error email KOSONG -> isi ulang (bukan skip).
+                empty_err = False
+                for em in ["Enter an email or phone", "Masukkan email atau nomor"]:
+                    try:
+                        if self.device(textContains=em).exists(timeout=0):
+                            empty_err = True
+                            break
+                    except Exception:
+                        continue
+                if empty_err:
+                    self.log_warn(f"Email kosong terdeteksi (try {email_try}), isi ulang")
+                    continue
+                email_ok = True
+                break
+            if not email_ok:
+                self.log_error(f"Email gagal diisi dengan benar setelah beberapa percobaan: {email}")
                 return False
-            pause(0.3)
-            if not self.click_google_next("Email step"):
-                self.log_error("Cannot click NEXT after email input")
-                return False
-            self.dismiss_crash_dialogs()
 
             # Tunggu salah satu: layar password muncul ATAU error "email tidak terdaftar".
             # Kalau tidak terdaftar -> skip cepat (tidak buang waktu proses penuh).
@@ -668,6 +715,7 @@ class EmulatorAutomator:
             "No connection", "Couldn't connect", "Tidak ada koneksi",
         ]
         for attempt in range(1, tries + 1):
+            self.close_notification_shade()
             self.device.press("home")
             self.device.app_start("com.android.vending")
             deadline = time.time() + action_timeout(8)
@@ -713,7 +761,9 @@ class EmulatorAutomator:
             self.log_info(f"====== STARTING NEW ACCOUNT PROCESS ======")
             self.log_info(f"Email: {email}, Paysafecard: {psc_email}")
             self.emit_progress(email, 5, "mulai proses")
-            
+            self.close_notification_shade()  # pastikan panel notifikasi/VPN tidak nyangkut
+            self.device.press("home")
+
             login_result = self.login_google(email, password)
             if login_result == "NOT_REGISTERED":
                 self.log_warn(f"Gsuite tidak terdaftar, skip tanpa proses penuh: {email}")
