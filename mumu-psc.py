@@ -115,6 +115,24 @@ class EmulatorAutomator:
             self.log_error(f"Failed to connect to emulator: {e}")
             return False
 
+    def ensure_connected(self):
+        """Cek koneksi emulator; reconnect kalau terputus (emulator stuck/restart di tengah jalan)."""
+        try:
+            _ = self.device.info  # akan error kalau device terputus
+            return True
+        except Exception as e:
+            self.log_warn(f"Emulator {self.port} terputus ({e}), mencoba reconnect...")
+            for attempt in range(1, int(os.getenv("EMU_RECONNECT_TRIES", "3")) + 1):
+                try:
+                    if self.connect():
+                        self.log_info(f"Reconnect emulator {self.port} berhasil (attempt {attempt})")
+                        return True
+                except Exception:
+                    pass
+                pause(3)
+            self.log_error(f"Reconnect emulator {self.port} gagal setelah beberapa percobaan")
+            return False
+
     def fast_click_text(self, text_list, timeout=3):
         """Text clicking with configurable timeout for slower RDP/emulator sessions"""
         for text in text_list:
@@ -1037,6 +1055,10 @@ def fast_process_emulator(automator):
                 break
             email, password = email_data.split("|")
             processed_count += 1
+            # Pastikan emulator masih konek; reconnect kalau stuck/terputus.
+            if not automator.ensure_connected():
+                automator.log_error(f"Emulator {automator.port} mati/stuck, hentikan emulator ini (akun sisa di-retry round berikutnya)")
+                break
             # Use configured PaysafeCard credential.
             result = automator.fast_process_account(email, password, PSC_EMAIL, PSC_PASS)
             if result == "NOT_REGISTERED":

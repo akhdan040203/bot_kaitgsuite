@@ -232,6 +232,10 @@ function toolbarKeyboard() {
   };
 }
 
+function backButton() {
+  return { inline_keyboard: [[{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }]] };
+}
+
 async function tg(method, payload = {}) {
   const { data } = await axios.post(`${API}/${method}`, payload, { timeout: 30000 });
   if (!data.ok) throw new Error(data.description || `Telegram ${method} failed`);
@@ -745,6 +749,8 @@ async function showQueue(chatId, telegramId) {
     0
   );
   const totalQueueOrders = activeOrders.length;
+  const totalAllAccounts = activeOrders.reduce((sum, order) => sum + Number(order.totalAccounts || 0), 0);
+  const totalDone = activeOrders.reduce((sum, order) => sum + Number(order.successCount || 0), 0);
   const orders = allOrders
     .filter((order) =>
       order.telegramId === String(telegramId) &&
@@ -764,6 +770,10 @@ async function showQueue(chatId, telegramId) {
       `📦 Order aktif: <b>${totalQueueOrders}</b>`,
       `📧 Total gsuite ngait: <b>${totalQueueAccounts}</b>`,
       "",
+      "📊 <b>Progress Total (semua order)</b>",
+      `<code>${miniBar(totalDone, totalAllAccounts || 1)}</code>`,
+      `${totalDone}/${totalAllAccounts} akun selesai`,
+      "",
       "📜 <b>Antrian Kamu</b>",
       orders.length
         ? orders
@@ -781,7 +791,15 @@ async function showQueue(chatId, telegramId) {
             })
             .join("\n\n")
         : "Belum ada order paid/proses.",
-    ].join("\n")
+    ].join("\n"),
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔄 Refresh", callback_data: "refresh_queue" }],
+          [{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }],
+        ],
+      },
+    }
   );
 }
 
@@ -1398,6 +1416,12 @@ async function handleCallback(query) {
   const data = query.data;
   await tg("answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
 
+  if (data === "back_menu") {
+    sessions.delete(String(chatId));
+    await deleteMessage(chatId, query.message?.message_id);
+    return showHome(chatId, from);
+  }
+
   if (data === "kait_psc") {
     sessions.set(String(chatId), { mode: "awaiting_kait" });
     const settings = await settingsStore.read();
@@ -1410,14 +1434,17 @@ async function handleCallback(query) {
         "Format lain seperti email:pass, email;pass, email pass akan otomatis di-convert.",
         "Hanya email GSuite/Google Workspace. Email gratis akan ditolak.",
         "Lebih dari 50 akun wajib kirim file .txt.",
-      ].join("\n")
+      ].join("\n"),
+      { reply_markup: backButton() }
     );
     return;
   }
 
   if (data === "convert_format") {
     sessions.set(String(chatId), { mode: "awaiting_convert" });
-    await sendMessage(chatId, "Kirim list akun atau upload file .txt untuk convert format.");
+    await sendMessage(chatId, "Kirim list akun atau upload file .txt untuk convert format.", {
+      reply_markup: backButton(),
+    });
     return;
   }
 
@@ -1439,6 +1466,10 @@ async function handleCallback(query) {
     return;
   }
   if (data === "queue") return showQueue(chatId, from.id);
+  if (data === "refresh_queue") {
+    await deleteMessage(chatId, query.message?.message_id);
+    return showQueue(chatId, from.id);
+  }
   if (data === "price_info") {
     const settings = await settingsStore.read();
     await sendMessage(
@@ -1451,13 +1482,16 @@ async function handleCallback(query) {
         renderPriceTiers(settings),
         "",
         `📌 Minimal order: <b>${getMinOrderAccounts(settings)} akun</b>`,
-      ].join("\n")
+      ].join("\n"),
+      { reply_markup: backButton() }
     );
     return;
   }
   if (data === "help") {
     const settings = await settingsStore.read();
-    await sendMessage(chatId, `Support: ${formatTelegramSupport(settings.support)}`);
+    await sendMessage(chatId, `Support: ${formatTelegramSupport(settings.support)}`, {
+      reply_markup: backButton(),
+    });
     return;
   }
   if (data.startsWith("checkpay_")) return checkAndUpdatePayment(chatId, data.replace("checkpay_", ""));

@@ -218,6 +218,17 @@ function runPscWorker(order, attempt, onProgress) {
         .catch(() => {});
     }, Number(process.env.CANCEL_POLL_MS || 4000));
 
+    // Timeout: kalau python hang terlalu lama (emulator stuck), kill biar order tidak nyangkut.
+    // Round berikutnya akan resume akun sisa otomatis.
+    const accountCount = readLines(inputFile).length;
+    const perAccountMs = Number(process.env.PSC_TIMEOUT_PER_ACCOUNT_MS || 120000);
+    const minTimeoutMs = Number(process.env.PSC_WORKER_MIN_TIMEOUT_MS || 600000);
+    const timeoutMs = Math.max(minTimeoutMs, accountCount * perAccountMs);
+    const killTimer = setTimeout(() => {
+      log(`order #${order.id} attempt ${attempt}: TIMEOUT ${Math.round(timeoutMs / 60000)} menit (kemungkinan emulator stuck) -> kill python`);
+      killChildTree(child);
+    }, timeoutMs);
+
     function handleProgressChunk(chunk) {
       stdoutBuffer += chunk.toString();
       const lines = stdoutBuffer.split(/\r?\n/);
@@ -245,11 +256,13 @@ function runPscWorker(order, attempt, onProgress) {
     });
     child.on("error", (error) => {
       clearInterval(cancelPoll);
+      clearTimeout(killTimer);
       log(`spawn error: ${error.message}`);
       reject(error);
     });
     child.on("close", (code) => {
       clearInterval(cancelPoll);
+      clearTimeout(killTimer);
       log(`attempt ${attempt}: mumu-psc.py exited with code ${code}`);
       if (stopped) {
         resolve({ resultFile, logFile, stopped: true });
