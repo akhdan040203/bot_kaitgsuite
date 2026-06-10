@@ -834,7 +834,29 @@ class EmulatorAutomator:
                     pass
                 continue
 
+            # Play Store home sudah muncul. Beri waktu LOGIN/LOAD akun dulu (emulator lambat
+            # sering blank kalau buru-buru ke payment). Pastikan home stabil sebelum navigasi.
+            warmup = float(os.getenv("PLAYSTORE_WARMUP_SEC", "5"))
+            self.log_info(f"Play Store home siap, warm-up {warmup}s biar load/login dulu...")
+            pause(warmup)
             self.fast_handle_popups()
+            # Konfirmasi home masih ada (tidak balik blank) setelah warm-up.
+            if not home_ready():
+                self.log_warn(f"Home hilang setelah warm-up (attempt {attempt}), buka ulang Play Store")
+                self.close_notification_shade()
+                self.device.press("home")
+                try:
+                    self.device.app_stop("com.android.vending")
+                    pause(1)
+                except Exception:
+                    pass
+                self.device.app_start("com.android.vending")
+                deadline2 = time.time() + action_timeout(10)
+                while time.time() < deadline2:
+                    if home_ready():
+                        break
+                    pause(0.5)
+                self.fast_handle_popups()
 
             # Klik menu Account (resource-id / text / description). Tanpa tap koordinat (berisiko).
             account_clicked = False
