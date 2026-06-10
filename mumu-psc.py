@@ -757,44 +757,38 @@ class EmulatorAutomator:
         return False
 
     def open_payment_methods(self, email):
-        """Buka LANGSUNG halaman Payment methods Play Store via deep link.
-        Skip Play Store home (yang sering loading lama). Tangani 'Try again' + tunggu siap."""
+        """Buka Play Store app lalu navigasi ke Payment methods (cara reliable, tidak blank).
+        Tunggu home siap + tangani 'Try again' sebelum navigasi."""
         tries = int(os.getenv("PSC_PLAYSTORE_TRIES", "3"))
         error_markers = [
             "Try again", "TRY AGAIN", "Retry", "Coba lagi", "COBA LAGI",
             "Something went wrong", "Terjadi kesalahan",
             "No connection", "Couldn't connect", "Tidak ada koneksi",
         ]
-        ready_markers = [
-            "Payment methods", "Metode pembayaran",
-            "Add PaysafeCard", "Payments & subscriptions", "Pembayaran & langganan",
-        ]
+        ready_pay = ["Add PaysafeCard", "Payment methods", "Metode pembayaran"]
+
+        def home_ready():
+            try:
+                return (
+                    self.device(resourceId="com.android.vending:id/account_menu_item").exists(timeout=0)
+                    or self.device(descriptionContains="Account").exists(timeout=0)
+                    or self.device(text="Games").exists(timeout=0)
+                    or self.device(text="For you").exists(timeout=0)
+                )
+            except Exception:
+                return False
+
         for attempt in range(1, tries + 1):
             self.close_notification_shade()
-            try:
-                self.device.shell(
-                    'am start -a android.intent.action.VIEW '
-                    '-d "https://play.google.com/store/paymentmethods"'
-                )
-            except Exception as e:
-                self.log_warn(f"Gagal kirim deep link payment methods: {e}")
-            deadline = time.time() + action_timeout(10)
+            self.device.press("home")
+            self.device.app_start("com.android.vending")
+            # Tunggu Play Store home siap; klik 'Try again' kalau error.
+            deadline = time.time() + action_timeout(12)
+            ok_home = False
             while time.time() < deadline:
-                # Sudah sampai halaman payment / sudah ada paysafecard?
-                for rm in ready_markers:
-                    try:
-                        if self.device(textContains=rm).exists(timeout=0):
-                            self.log_info(f"Payment methods siap (attempt {attempt}) [{rm}]")
-                            return True
-                    except Exception:
-                        continue
-                try:
-                    if self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=0):
-                        self.log_info("PaysafeCard sudah terlihat di payment methods")
-                        return True
-                except Exception:
-                    pass
-                # Error / Try again -> klik biar coba lagi.
+                if home_ready():
+                    ok_home = True
+                    break
                 clicked = False
                 for em in error_markers:
                     try:
@@ -808,13 +802,57 @@ class EmulatorAutomator:
                     except Exception:
                         continue
                 if not clicked:
-                    pause(0.5)
-            self.log_warn(f"Payment methods belum siap (attempt {attempt}/{tries}), ulangi deep link")
+                    pause(0.4)
+            if not ok_home:
+                self.log_warn(f"Play Store home belum siap (attempt {attempt}/{tries}), restart app")
+                try:
+                    self.device.app_stop("com.android.vending")
+                    pause(1)
+                except Exception:
+                    pass
+                continue
+
+            self.fast_handle_popups()
+
+            # Klik menu Account (resource-id / text / description). Tanpa tap koordinat (berisiko).
+            account_clicked = False
+            for strat in [
+                lambda: self.click_candidates(resource_ids=["com.android.vending:id/account_menu_item"], timeout=2),
+                lambda: self.device(descriptionContains="Account").click_exists(timeout=action_timeout(2)),
+                lambda: self.click_candidates(texts=["Account"], timeout=2),
+            ]:
+                try:
+                    if strat():
+                        account_clicked = True
+                        break
+                except Exception:
+                    continue
+            pause(1)
+
+            # Navigasi: Payments & subscriptions -> Payment methods.
+            for en_text, id_text in [
+                ("Payments & subscriptions", "Pembayaran & langganan"),
+                ("Payment methods", "Metode pembayaran"),
+            ]:
+                self.click_candidates(texts=[en_text, id_text], timeout=3)
+                pause(1.5)
+
+            # Cek halaman payment methods sudah terbuka.
+            for rm in ready_pay:
+                try:
+                    if self.device(textContains=rm).exists(timeout=action_timeout(2)):
+                        self.log_info(f"Payment methods siap (attempt {attempt}) [{rm}]")
+                        return True
+                except Exception:
+                    continue
             try:
-                self.device.app_stop("com.android.vending")
-                pause(1)
+                if self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=0):
+                    self.log_info("PaysafeCard sudah terlihat di payment methods")
+                    return True
             except Exception:
                 pass
+            self.log_warn(f"Payment methods belum kebuka (attempt {attempt}/{tries}), ulangi")
+
         self.log_error(f"Payment methods gagal dibuka untuk {email} setelah {tries}x")
         return False
 
