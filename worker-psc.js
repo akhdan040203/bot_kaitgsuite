@@ -483,12 +483,8 @@ async function processOrder(order) {
       )
     );
 
-    // Refund proporsional: dihitung dari yang BENAR-BENAR dibayar (subtotal - diskon voucher),
-    // dibagi rata per akun. Jadi kalau 50% gagal -> refund 50% dari yang dibayar.
-    const paidForAccounts = Math.max(0, Number(order.basePrice || 0) - Number(order.voucherDiscount || 0));
-    const refundAmount = remainingCount > 0
-      ? Math.round((paidForAccounts * remainingCount) / Math.max(1, totalAccounts))
-      : 0;
+    // Auto-refund: tiap akun gagal (setelah semua retry) -> +1 CREDIT (bisa dipakai ngait gratis).
+    const refundCredit = remainingCount > 0 ? remainingCount : 0;
     let bonusGranted = 0;
     let bonusMilestoneReached = 0;
     await usersStore.update((users) => {
@@ -496,19 +492,19 @@ async function processOrder(order) {
       if (user) {
         user.totalKait = Number(user.totalKait || 0) + successCount;
         user.totalSpend = Number(user.totalSpend || 0) + Number(order.totalPrice || 0);
-        // Auto-refund akun gagal (setelah semua retry) -> saldo (Rupiah).
-        if (refundAmount > 0) {
-          user.balance = Number(user.balance || 0) + refundAmount;
+        // Auto-refund akun gagal -> credit (jumlah akun).
+        if (refundCredit > 0) {
+          user.credit = Number(user.credit || 0) + refundCredit;
         }
-        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +bonus Rupiah ke saldo.
+        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +50 credit akun.
         const step = Number(process.env.BONUS_MILESTONE_STEP || 1000);
-        const perMilestone = Number(process.env.BONUS_RUPIAH_PER_1000 || 10000);
+        const perMilestone = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
         const before = Number(user.bonusMilestone || 0);
         const reached = Math.floor(user.totalKait / step) * step;
         if (reached > before) {
           const crossed = (reached - before) / step;
           bonusGranted = crossed * perMilestone;
-          user.balance = Number(user.balance || 0) + bonusGranted;
+          user.credit = Number(user.credit || 0) + bonusGranted;
           user.bonusMilestone = reached;
           bonusMilestoneReached = reached;
         }
@@ -522,8 +518,8 @@ async function processOrder(order) {
           "🎉 <b>Selamat! Bonus Loyalitas</b>",
           "",
           `Kamu sudah ngait ${bonusMilestoneReached}+ akun!`,
-          `🎁 Bonus saldo: <b>${rp(bonusGranted)}</b> ditambahkan.`,
-          "Saldo otomatis dipakai untuk bayar order berikutnya.",
+          `🎁 Bonus credit: <b>${bonusGranted} akun</b> ditambahkan.`,
+          "Credit otomatis dipakai untuk ngait gratis di order berikutnya.",
         ].join("\n")
       );
     }
@@ -537,8 +533,8 @@ async function processOrder(order) {
         `Berhasil: ${successCount}`,
         notRegisteredCount ? `Gsuite tidak terdaftar: ${notRegisteredCount}` : "",
         `Gagal/belum berhasil: ${remainingCount}`,
-        refundAmount
-          ? `\n💰 ${remainingCount} akun gagal → auto-refund ${rp(refundAmount)} ke saldo (bisa dipakai untuk order berikutnya).`
+        refundCredit
+          ? `\n🎁 ${remainingCount} akun gagal → +${refundCredit} credit ngait (bisa dipakai gratis untuk order berikutnya).`
           : "",
       ].filter(Boolean).join("\n")
     );

@@ -105,26 +105,27 @@ async function getActiveVoucher(code) {
   return v;
 }
 
-// Hitung rincian harga: voucher (diskon persen) + saldo Rupiah (dipotong dari total).
+// Hitung rincian harga: credit (akun gratis) + voucher (diskon persen).
+// credit = jumlah akun yang bisa dikait gratis (1 credit = 1 akun).
 function computeOrderPricing(validCount, settings, user, voucher) {
+  const creditAvailable = Number((user && user.credit) || 0);
+  const freeUsed = Math.min(creditAvailable, validCount);
+  const chargeableCount = Math.max(0, validCount - freeUsed);
   const pricePerAccount = getPricePerAccount(validCount, settings);
-  const subtotal = validCount * pricePerAccount;
+  const subtotal = chargeableCount * pricePerAccount;
   const voucherPercent = voucher && voucher.percent ? Number(voucher.percent) : 0;
   const voucherDiscount = voucherPercent ? Math.floor((subtotal * voucherPercent) / 100) : 0;
   const afterDiscount = Math.max(0, subtotal - voucherDiscount);
-  const balance = Number((user && user.balance) || 0);
-  const balanceUsed = Math.min(balance, afterDiscount);
-  const afterBalance = Math.max(0, afterDiscount - balanceUsed);
   return {
     validCount,
+    freeUsed,
+    chargeableCount,
     pricePerAccount,
     subtotal,
     voucherCode: voucher ? voucher.code : null,
     voucherPercent,
     voucherDiscount,
     afterDiscount,
-    balanceUsed,
-    afterBalance,
   };
 }
 
@@ -140,10 +141,10 @@ async function consumeOrderBenefits(orderId) {
     })
   );
   if (!target) return;
-  if (Number(target.balanceUsed || 0) > 0) {
+  if (Number(target.freeUsed || 0) > 0) {
     await usersStore.update((users) => {
       const u = users[target.telegramId];
-      if (u) u.balance = Math.max(0, Number(u.balance || 0) - Number(target.balanceUsed));
+      if (u) u.credit = Math.max(0, Number(u.credit || 0) - Number(target.freeUsed));
       return users;
     });
   }
@@ -247,7 +248,7 @@ async function registerBotCommands() {
     commands: [
       { command: "start", description: "Start the bot" },
       { command: "hitung", description: "Kalkulasi harga (mis. /hitung 250)" },
-      { command: "saldo", description: "Cek saldo kamu" },
+      { command: "saldo", description: "Cek credit ngait kamu" },
     ],
     scope: { type: "default" },
   });
@@ -396,7 +397,7 @@ async function showHome(chatId, from) {
     `L ID: <code>${user.telegramId}</code>`,
     `L Username: ${username}`,
     `L Total Kait: ${user.totalKait || 0}`,
-    `L Saldo: ${formatRupiah(user.balance || 0)}`,
+    `L Credit Ngait: ${user.credit || 0} akun`,
     `L Total Pengeluaran: ${formatRupiah(user.totalSpend || 0)}`,
     "",
     "<b>Configuration</b>",
@@ -453,12 +454,13 @@ function buildOrderSummary(parsed, settings, user, voucher) {
     `Duplicate: ${parsed.duplicate}`,
     "",
     `Harga: ${formatRupiah(p.pricePerAccount)} / akun (sesuai jumlah akun)`,
-    `Subtotal: ${formatRupiah(p.subtotal)}`,
   ];
+  if (p.freeUsed > 0) lines.push(`🎁 Credit dipakai: ${p.freeUsed} akun (gratis)`);
+  lines.push(`Akun kena biaya: ${p.chargeableCount}`);
+  lines.push(`Subtotal: ${formatRupiah(p.subtotal)}`);
   if (p.voucherCode) lines.push(`🎟️ Voucher ${p.voucherCode} (-${p.voucherPercent}%): -${formatRupiah(p.voucherDiscount)}`);
-  if (p.balanceUsed > 0) lines.push(`💰 Saldo dipakai: -${formatRupiah(p.balanceUsed)}`);
-  lines.push(`Total bayar: <b>${formatRupiah(p.afterBalance)}</b>${p.afterBalance === 0 ? " (LUNAS via saldo)" : ""}`);
-  if (p.afterBalance > 0) lines.push("Total final dibuat setelah QRIS agar bisa diberi kode unik.");
+  lines.push(`Total: <b>${formatRupiah(p.afterDiscount)}</b>${p.afterDiscount === 0 ? " (GRATIS pakai credit)" : ""}`);
+  if (p.afterDiscount > 0) lines.push("Total final dibuat setelah QRIS agar bisa diberi kode unik.");
   return lines.join("\n");
 }
 
@@ -529,9 +531,9 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   const pricing = computeOrderPricing(parsed.valid.length, settings, user, voucher);
 
   const now = new Date().toISOString();
-  const isFree = pricing.afterBalance <= 0;
+  const isFree = pricing.afterDiscount <= 0;
   const uniqueCode = isFree ? 0 : getUniquePaymentCode(orderId, settings);
-  const totalPrice = pricing.afterBalance + uniqueCode;
+  const totalPrice = pricing.afterDiscount + uniqueCode;
 
   const baseOrder = {
     id: orderId,
@@ -542,7 +544,8 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     invalidAccounts: parsed.invalid.length,
     duplicateAccounts: parsed.duplicate,
     pricePerAccount: pricing.pricePerAccount,
-    balanceUsed: pricing.balanceUsed,
+    freeUsed: pricing.freeUsed,
+    chargeableCount: pricing.chargeableCount,
     voucherCode: pricing.voucherCode,
     voucherPercent: pricing.voucherPercent,
     voucherDiscount: pricing.voucherDiscount,
@@ -557,36 +560,35 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     updatedAt: now,
   };
 
-  // ===== Order LUNAS via saldo (saldo + voucher menutup semua biaya) =====
+  // ===== Order GRATIS (credit + voucher menutup semua biaya) =====
   if (isFree) {
-    const order = { ...baseOrder, status: "QUEUED", payment: { provider: "balance", status: "PAID" }, paidAt: now };
+    const order = { ...baseOrder, status: "QUEUED", payment: { provider: "credit", status: "PAID" }, paidAt: now };
     await ordersStore.update((orders) => {
       orders.push(order);
       return orders;
     });
     await consumeOrderBenefits(orderId);
-    log(`created order #${orderId} LUNAS via saldo user=@${order.username || "-"} accounts=${order.totalAccounts} saldoUsed=${pricing.balanceUsed}`);
+    log(`created order #${orderId} GRATIS pakai credit user=@${order.username || "-"} accounts=${order.totalAccounts} creditUsed=${pricing.freeUsed}`);
     sessions.delete(String(chatId));
     await sendMessage(
       chatId,
       [
-        `🎉 <b>Order #${orderId} LUNAS via saldo!</b>`,
+        `🎉 <b>Order #${orderId} GRATIS!</b>`,
         "",
         `Total akun: ${order.totalAccounts}`,
-        `Subtotal: ${formatRupiah(pricing.subtotal)}`,
-        pricing.voucherCode ? `🎟️ Voucher ${pricing.voucherCode} (-${pricing.voucherPercent}%): -${formatRupiah(pricing.voucherDiscount)}` : "",
-        `💰 Saldo dipakai: -${formatRupiah(pricing.balanceUsed)}`,
-        "Langsung masuk antrian, tidak perlu bayar QRIS.",
+        `🎁 Credit dipakai: ${pricing.freeUsed} akun`,
+        pricing.voucherCode ? `🎟️ Voucher ${pricing.voucherCode} (-${pricing.voucherPercent}%)` : "",
+        "Langsung masuk antrian, tidak perlu bayar.",
       ].filter(Boolean).join("\n")
     );
     await notifyAdmins(
       [
-        "🔔 <b>Order Baru (LUNAS via saldo)</b>",
+        "🔔 <b>Order Baru (GRATIS pakai credit)</b>",
         "",
         `🆔 Order: <code>${orderId}</code>`,
         `👤 User: ${order.username ? "@" + order.username : order.telegramId}`,
         `📧 Jumlah akun: <b>${order.totalAccounts}</b>`,
-        `💰 Saldo dipakai: ${formatRupiah(pricing.balanceUsed)}`,
+        `🎁 Credit dipakai: ${pricing.freeUsed} akun`,
         pricing.voucherCode ? `🎟️ Voucher: ${pricing.voucherCode} -${pricing.voucherPercent}%` : "",
       ].filter(Boolean).join("\n"),
       String(from.id)
@@ -623,7 +625,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
       `🆔 Order: <code>${orderId}</code>`,
       `👤 User: ${order.username ? "@" + order.username : order.telegramId}`,
       `📧 Jumlah akun: <b>${order.totalAccounts}</b>`,
-      pricing.balanceUsed ? `💰 Saldo dipakai: ${formatRupiah(pricing.balanceUsed)}` : "",
+      pricing.freeUsed ? `🎁 Credit dipakai: ${pricing.freeUsed} akun` : "",
       pricing.voucherCode ? `🎟️ Voucher: ${pricing.voucherCode} -${pricing.voucherPercent}%` : "",
       `💰 Total bayar: <b>${formatRupiah(totalPrice)}</b>`,
       "💳 Status: Menunggu pembayaran",
@@ -635,9 +637,9 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     `<b>QRIS Order #${orderId}</b>`,
     "",
     `Total akun: ${order.totalAccounts}`,
+    pricing.freeUsed ? `🎁 Credit dipakai: ${pricing.freeUsed} | Kena biaya: ${pricing.chargeableCount}` : "",
     `Subtotal: ${formatRupiah(pricing.subtotal)}`,
     pricing.voucherCode ? `🎟️ Voucher ${pricing.voucherCode}: -${formatRupiah(pricing.voucherDiscount)}` : "",
-    pricing.balanceUsed ? `💰 Saldo dipakai: -${formatRupiah(pricing.balanceUsed)}` : "",
     uniqueCode ? `Kode unik: ${formatRupiah(uniqueCode)}` : "",
     `Total bayar: <b>${formatRupiah(totalPrice)}</b>`,
     "",
@@ -955,8 +957,8 @@ async function handleAdminCommand(chatId, text) {
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
         "/users  (daftar user + ID + saldo)",
-        "/saldo USER_ID|@username  (cek saldo user)",
-        "/addsaldo USER_ID|@username JUMLAH",
+        "/saldo USER_ID|@username  (cek credit user)",
+        "/addsaldo USER_ID|@username JUMLAH  (credit = jumlah akun)",
         "/broadcast pesan",
         "/pause",
         "/resume",
@@ -1074,10 +1076,10 @@ async function handleAdminCommand(chatId, text) {
       await sendMessage(
         chatId,
         [
-          "Format (saldo dalam Rupiah):",
-          "/addsaldo USER_ID|@username NOMINAL   (tambah/kurang, mis. 50000 atau -10000)",
-          "/setsaldo USER_ID|@username NOMINAL   (set nilai pasti)",
-          "Contoh: /addsaldo @bgzess 50000  atau  /addsaldo 7455452803 50000",
+          "Format (credit = jumlah akun gratis):",
+          "/addsaldo USER_ID|@username JUMLAH   (tambah/kurang, mis. 9 atau -3)",
+          "/setsaldo USER_ID|@username JUMLAH   (set nilai pasti)",
+          "Contoh: /addsaldo @bgzess 9  (= 9 akun gratis)",
           "Lihat daftar user & ID: /users",
         ].join("\n")
       );
@@ -1097,13 +1099,13 @@ async function handleAdminCommand(chatId, text) {
       targetId = String(match.telegramId);
     }
     let found = false;
-    let newBalance = 0;
+    let newCredit = 0;
     await usersStore.update((users) => {
       if (users[targetId]) {
         found = true;
-        const current = Number(users[targetId].balance || 0);
-        newBalance = Math.max(0, command === "/setsaldo" ? amount : current + amount);
-        users[targetId].balance = newBalance;
+        const current = Number(users[targetId].credit || 0);
+        newCredit = Math.max(0, command === "/setsaldo" ? amount : current + amount);
+        users[targetId].credit = newCredit;
       }
       return users;
     });
@@ -1113,10 +1115,10 @@ async function handleAdminCommand(chatId, text) {
     }
     await sendMessage(
       chatId,
-      `✅ Saldo user <code>${targetId}</code> sekarang: <b>${formatRupiah(newBalance)}</b>.`
+      `✅ Credit user <code>${targetId}</code> sekarang: <b>${newCredit} akun</b>.`
     );
     try {
-      await sendMessage(targetId, `💰 Saldo kamu diperbarui admin. Sekarang: <b>${formatRupiah(newBalance)}</b> (bisa dipakai untuk bayar order).`);
+      await sendMessage(targetId, `🎁 Credit ngait kamu diperbarui admin. Sekarang: <b>${newCredit} akun</b> (bisa dipakai gratis untuk ngait).`);
     } catch (_) {}
     return true;
   }
@@ -1141,7 +1143,7 @@ async function handleAdminCommand(chatId, text) {
             [
               `👤 ${u.username ? "@" + u.username : "(tanpa username)"}`,
               `   🆔 <code>${u.telegramId}</code>`,
-              `   Kait: ${u.totalKait || 0} | Saldo: ${formatRupiah(u.balance || 0)}`,
+              `   Kait: ${u.totalKait || 0} | Credit: ${u.credit || 0} akun`,
             ].join("\n")
           )
           .join("\n\n")
@@ -1153,7 +1155,7 @@ async function handleAdminCommand(chatId, text) {
         "",
         body,
         "",
-        "Tambah saldo: /addsaldo USER_ID|@username JUMLAH",
+        "Tambah credit: /addsaldo USER_ID|@username JUMLAH",
       ].join("\n")
     );
     return true;
@@ -1324,17 +1326,17 @@ async function handleMessage(message) {
       await sendMessage(
         chatId,
         [
-          "💰 <b>Saldo User</b>",
+          "🎁 <b>Credit User</b>",
           `👤 ${u.username ? "@" + u.username : u.telegramId}`,
           `🆔 <code>${u.telegramId}</code>`,
-          `Saldo: <b>${formatRupiah(u.balance || 0)}</b>`,
+          `Credit ngait: <b>${u.credit || 0} akun</b>`,
           `Total Kait: ${u.totalKait || 0}`,
         ].join("\n")
       );
       return;
     }
     const me = users[String(chatId)] || {};
-    await sendMessage(chatId, `💰 Saldo kamu: <b>${formatRupiah(me.balance || 0)}</b>`);
+    await sendMessage(chatId, `🎁 Credit ngait kamu: <b>${me.credit || 0} akun</b>`);
     return;
   }
 

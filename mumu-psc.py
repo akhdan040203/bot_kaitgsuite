@@ -756,6 +756,68 @@ class EmulatorAutomator:
         switch_vpn_uk(self.log_warn)
         return False
 
+    def open_payment_methods(self, email):
+        """Buka LANGSUNG halaman Payment methods Play Store via deep link.
+        Skip Play Store home (yang sering loading lama). Tangani 'Try again' + tunggu siap."""
+        tries = int(os.getenv("PSC_PLAYSTORE_TRIES", "3"))
+        error_markers = [
+            "Try again", "TRY AGAIN", "Retry", "Coba lagi", "COBA LAGI",
+            "Something went wrong", "Terjadi kesalahan",
+            "No connection", "Couldn't connect", "Tidak ada koneksi",
+        ]
+        ready_markers = [
+            "Payment methods", "Metode pembayaran",
+            "Add PaysafeCard", "Payments & subscriptions", "Pembayaran & langganan",
+        ]
+        for attempt in range(1, tries + 1):
+            self.close_notification_shade()
+            try:
+                self.device.shell(
+                    'am start -a android.intent.action.VIEW '
+                    '-d "https://play.google.com/store/paymentmethods"'
+                )
+            except Exception as e:
+                self.log_warn(f"Gagal kirim deep link payment methods: {e}")
+            deadline = time.time() + action_timeout(10)
+            while time.time() < deadline:
+                # Sudah sampai halaman payment / sudah ada paysafecard?
+                for rm in ready_markers:
+                    try:
+                        if self.device(textContains=rm).exists(timeout=0):
+                            self.log_info(f"Payment methods siap (attempt {attempt}) [{rm}]")
+                            return True
+                    except Exception:
+                        continue
+                try:
+                    if self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=0):
+                        self.log_info("PaysafeCard sudah terlihat di payment methods")
+                        return True
+                except Exception:
+                    pass
+                # Error / Try again -> klik biar coba lagi.
+                clicked = False
+                for em in error_markers:
+                    try:
+                        sel = self.device(textContains=em)
+                        if sel.exists(timeout=0):
+                            self.log_warn(f"Play Store error '{em}' (attempt {attempt}), klik coba lagi")
+                            sel.click_exists(timeout=action_timeout(1))
+                            clicked = True
+                            pause(2)
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    pause(0.5)
+            self.log_warn(f"Payment methods belum siap (attempt {attempt}/{tries}), ulangi deep link")
+            try:
+                self.device.app_stop("com.android.vending")
+                pause(1)
+            except Exception:
+                pass
+        self.log_error(f"Payment methods gagal dibuka untuk {email} setelah {tries}x")
+        return False
+
     def fast_process_account(self, email, password, psc_email, psc_pass):
         try:
             self.log_info(f"====== STARTING NEW ACCOUNT PROCESS ======")
@@ -780,53 +842,15 @@ class EmulatorAutomator:
                 return False
             self.emit_progress(email, 20, "login google berhasil")
 
-            # Buka Play Store dengan retry + klik "Try again". Kalau 3x gagal -> ganti VPN
-            # ExpressVPN ke lokasi UK lain, lalu akun ini di-retry worker dengan IP baru.
-            if not self.open_play_store_with_retry(email):
-                self.log_error(f"Play Store tidak bisa dibuka untuk {email} (VPN sudah diganti), hapus akun & retry")
+            # Buka LANGSUNG halaman Payment methods via deep link (skip Play Store home
+            # yang sering loading lama). Lebih cepat & tidak gampang gagal.
+            self.emit_progress(email, 30, "buka payment methods")
+            if not self.open_payment_methods(email):
+                self.log_error(f"Payment methods tidak terbuka untuk {email}, hapus akun & retry")
                 self.fast_remove_google_account(email)
                 return False
-            self.emit_progress(email, 30, "buka play store")
-
-            # Fast popup handling
             self.fast_handle_popups()
-
-            # Optimized account clicking with multiple strategies
-            account_clicked = False
-            click_strategies = [
-                lambda: self.click_candidates(resource_ids=["com.android.vending:id/account_menu_item"], timeout=2),
-                lambda: self.click_candidates(texts=["Account"], timeout=2),
-                lambda: self.device(descriptionContains="Account").click_exists(timeout=action_timeout(2)),
-                lambda: (self.device.click(450, 100), True)[1]  # Coordinate fallback
-            ]
-            
-            for i, strategy in enumerate(click_strategies):
-                try:
-                    if strategy():
-                        self.log_info(f"Account clicked using strategy {i+1}")
-                        account_clicked = True
-                        break
-                except:
-                    continue
-                    
-                if i < len(click_strategies) - 1:  # Don't handle popups on last attempt
-                    self.fast_handle_popups()
-                    pause(1)
-
-            pause(2)
-            self.emit_progress(email, 40, "buka menu akun play store")
-
-            # Fast navigation to payment methods
-            payment_menus = [
-                ("Payments & subscriptions", "Pembayaran & langganan"),
-                ("Payment methods", "Metode pembayaran")
-            ]
-            
-            for en_text, id_text in payment_menus:
-                if not self.click_candidates(texts=[en_text, id_text], timeout=2):
-                    self.log_warn(f"Could not find {en_text}")
-                pause(2)
-            self.emit_progress(email, 50, "buka payment methods")
+            self.emit_progress(email, 50, "payment methods siap")
 
             # Check if DOKU already exists
             if self.has_paysafecard_payment_method(timeout=3):
