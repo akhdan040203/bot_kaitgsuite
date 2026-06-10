@@ -791,6 +791,15 @@ class EmulatorAutomator:
             except Exception:
                 return False
 
+        def screen_is_blank():
+            # Blank = hierarchy sangat pendek (tidak ada konten). Halaman payment/webview yang
+            # ada isinya (walau teks tak terbaca) -> TIDAK blank, jadi jangan di-relaunch.
+            try:
+                h = self.device.dump_hierarchy(compressed=True) or ""
+                return len(h) < int(os.getenv("PLAYSTORE_BLANK_HIER_LEN", "800"))
+            except Exception:
+                return False
+
         # Kalau SUDAH di halaman payment (mis. setelah login langsung nyangkut di sana),
         # langsung lanjut TANPA restart Play Store (biar tidak close & buka ulang sia-sia).
         if already_on_payment():
@@ -808,17 +817,18 @@ class EmulatorAutomator:
             except Exception:
                 pass
             self.device.app_start("com.android.vending")
-            # Tunggu Play Store home siap; klik 'Try again' kalau error.
-            deadline = time.time() + action_timeout(12)
-            ok_home = False
+            # Tunggu sampai SIAP (home / payment) / blank kelamaan.
+            deadline = time.time() + action_timeout(int(os.getenv("PLAYSTORE_WAIT_SEC", "25")))
+            state = None  # "home" | "blank" | None(=ada konten tapi bukan home)
             blank_since = time.time()
             while time.time() < deadline:
                 if already_on_payment():
-                    self.log_info("Nyangkut di halaman payment saat menunggu, lanjut tanpa navigasi")
+                    self.log_info("Sudah di halaman payment saat menunggu, lanjut")
                     return True
                 if home_ready():
-                    ok_home = True
+                    state = "home"
                     break
+                # Klik 'Try again' kalau error koneksi.
                 clicked = False
                 for em in error_markers:
                     try:
@@ -834,8 +844,11 @@ class EmulatorAutomator:
                 if clicked:
                     blank_since = time.time()
                     continue
-                # Layar BLANK (tidak ada home, tidak ada error) kelamaan -> buka ulang app Play Store.
-                if time.time() - blank_since > float(os.getenv("PLAYSTORE_BLANK_RELAUNCH_SEC", "12")):
+                # Relaunch HANYA kalau layar benar-benar BLANK (kosong). Kalau ada konten
+                # (mis. halaman payment/webview yang teksnya tak terbaca) -> JANGAN relaunch.
+                if not screen_is_blank():
+                    blank_since = time.time()
+                elif time.time() - blank_since > float(os.getenv("PLAYSTORE_BLANK_RELAUNCH_SEC", "12")):
                     self.log_warn(f"Layar blank (attempt {attempt}), buka ulang app Play Store")
                     self.close_notification_shade()
                     self.device.press("home")
@@ -845,39 +858,30 @@ class EmulatorAutomator:
                     except Exception:
                         pass
                     self.device.app_start("com.android.vending")
+                    state = "blank"
                     blank_since = time.time()
-                pause(0.4)
-            if not ok_home:
-                self.log_warn(f"Play Store home belum siap (attempt {attempt}/{tries}), restart app")
+                pause(0.5)
+
+            if state == "home":
+                # Beri waktu load/login sebelum navigasi (emulator lambat).
+                warmup = float(os.getenv("PLAYSTORE_WARMUP_SEC", "5"))
+                self.log_info(f"Play Store home siap, warm-up {warmup}s biar load/login dulu...")
+                pause(warmup)
+                self.fast_handle_popups()
+            elif already_on_payment():
+                return True
+            elif screen_is_blank():
+                self.log_warn(f"Play Store blank (attempt {attempt}/{tries}), restart")
                 try:
                     self.device.app_stop("com.android.vending")
                     pause(1)
                 except Exception:
                     pass
                 continue
-
-            # Play Store home sudah muncul. Beri waktu LOGIN/LOAD akun dulu (emulator lambat
-            # sering blank kalau buru-buru ke payment). Pastikan home stabil sebelum navigasi.
-            warmup = float(os.getenv("PLAYSTORE_WARMUP_SEC", "5"))
-            self.log_info(f"Play Store home siap, warm-up {warmup}s biar load/login dulu...")
-            pause(warmup)
-            self.fast_handle_popups()
-            # Konfirmasi home masih ada (tidak balik blank) setelah warm-up.
-            if not home_ready():
-                self.log_warn(f"Home hilang setelah warm-up (attempt {attempt}), buka ulang Play Store")
-                self.close_notification_shade()
-                self.device.press("home")
-                try:
-                    self.device.app_stop("com.android.vending")
-                    pause(1)
-                except Exception:
-                    pass
-                self.device.app_start("com.android.vending")
-                deadline2 = time.time() + action_timeout(10)
-                while time.time() < deadline2:
-                    if home_ready():
-                        break
-                    pause(0.5)
+            else:
+                # Ada konten tapi home tak terdeteksi (mungkin sudah di sub-page payment/webview)
+                # -> coba lanjut NAVIGASI langsung, JANGAN restart (biar tidak close-buka terus).
+                self.log_warn(f"Home tak terdeteksi tapi ada konten (attempt {attempt}), coba navigasi langsung")
                 self.fast_handle_popups()
 
             # Klik menu Account (resource-id / text / description). Tanpa tap koordinat (berisiko).
