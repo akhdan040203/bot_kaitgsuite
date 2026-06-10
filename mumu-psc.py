@@ -765,6 +765,21 @@ class EmulatorAutomator:
         ]
         ready_pay = ["Add PaysafeCard", "Payment methods", "Metode pembayaran"]
 
+        def already_on_payment():
+            # Sudah di halaman payment methods / Add PaysafeCard / paysafecard? -> jangan restart.
+            for rm in ready_pay:
+                try:
+                    if self.device(textContains=rm).exists(timeout=0):
+                        return True
+                except Exception:
+                    continue
+            try:
+                if self.device(textMatches="(?i)^paysafecard[:：].*").exists(timeout=0):
+                    return True
+            except Exception:
+                pass
+            return False
+
         def home_ready():
             try:
                 return (
@@ -775,6 +790,12 @@ class EmulatorAutomator:
                 )
             except Exception:
                 return False
+
+        # Kalau SUDAH di halaman payment (mis. setelah login langsung nyangkut di sana),
+        # langsung lanjut TANPA restart Play Store (biar tidak close & buka ulang sia-sia).
+        if already_on_payment():
+            self.log_info("Sudah di halaman payment methods, lanjut tanpa restart Play Store")
+            return True
 
         for attempt in range(1, tries + 1):
             self.close_notification_shade()
@@ -792,6 +813,9 @@ class EmulatorAutomator:
             ok_home = False
             blank_since = time.time()
             while time.time() < deadline:
+                if already_on_payment():
+                    self.log_info("Nyangkut di halaman payment saat menunggu, lanjut tanpa navigasi")
+                    return True
                 if home_ready():
                     ok_home = True
                     break
