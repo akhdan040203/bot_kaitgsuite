@@ -288,12 +288,18 @@ async function processOrder(order) {
   const progressMessageId = initialProgress?.message_id;
 
   // Kirim file akun yang akan dikait ke admin saat mulai proses.
+  // Saat resume, input.txt = akun SISA (bukan original), jadi caption disesuaikan.
+  const startInputFile = path.join(order.orderPath, "input.txt");
+  const startCount = countLines(startInputFile);
+  const isResume = startCount > 0 && startCount < Number(order.totalAccounts || 0);
   for (const adminId of ADMIN_IDS) {
     if (String(adminId) === String(order.telegramId)) continue;
     await sendDocument(
       adminId,
-      path.join(order.orderPath, "input.txt"),
-      `[ADMIN] Mulai ngait order #${order.id} • ${order.totalAccounts} akun • user @${order.username || "-"}`
+      startInputFile,
+      isResume
+        ? `[ADMIN] Lanjut (resume) order #${order.id} • sisa ${startCount} akun • user @${order.username || "-"}`
+        : `[ADMIN] Mulai ngait order #${order.id} • ${startCount} akun • user @${order.username || "-"}`
     );
   }
 

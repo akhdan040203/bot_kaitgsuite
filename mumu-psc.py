@@ -134,14 +134,12 @@ class EmulatorAutomator:
             return False
 
     def close_notification_shade(self):
-        """Tutup panel notifikasi/quick settings kalau kebuka (mis. notif VPN ExpressVPN)."""
+        """Tutup panel notifikasi/quick settings kalau kebuka (mis. notif VPN ExpressVPN).
+        Pakai 'statusbar collapse' SAJA — TIDAK press back, biar tidak salah keluar dari layar aktif."""
         try:
             self.device.shell("cmd statusbar collapse")
         except Exception:
-            try:
-                self.device.press("back")
-            except Exception:
-                pass
+            pass
 
     def fast_click_text(self, text_list, timeout=3):
         """Text clicking with configurable timeout for slower RDP/emulator sessions"""
@@ -813,7 +811,7 @@ class EmulatorAutomator:
                     blank_since = time.time()
                     continue
                 # Layar BLANK (tidak ada home, tidak ada error) kelamaan -> buka ulang app Play Store.
-                if time.time() - blank_since > float(os.getenv("PLAYSTORE_BLANK_RELAUNCH_SEC", "6")):
+                if time.time() - blank_since > float(os.getenv("PLAYSTORE_BLANK_RELAUNCH_SEC", "12")):
                     self.log_warn(f"Layar blank (attempt {attempt}), buka ulang app Play Store")
                     self.close_notification_shade()
                     self.device.press("home")
@@ -1000,7 +998,7 @@ class EmulatorAutomator:
             # Verifikasi. Kalau app sempat FORCE-CLOSE ke home (sering pas isi nama / after pay),
             # cek pertama bisa gagal karena Play Store tidak di halaman payment. PaysafeCard tetap
             # terikat ke AKUN walau app crash, jadi buka ulang payment methods lalu cek lagi.
-            verified = self.has_paysafecard_payment_method(timeout=8)
+            verified = self.has_paysafecard_payment_method(timeout=int(os.getenv("PSC_VERIFY_TIMEOUT", "12")))
             if not verified:
                 reopen_tries = int(os.getenv("PSC_VERIFY_REOPEN_TRIES", "2"))
                 for vtry in range(1, reopen_tries + 1):
