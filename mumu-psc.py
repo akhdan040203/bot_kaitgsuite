@@ -781,10 +781,18 @@ class EmulatorAutomator:
         for attempt in range(1, tries + 1):
             self.close_notification_shade()
             self.device.press("home")
+            pause(0.5)
+            # Force-stop dulu biar tidak resume layar blank/stuck, lalu buka app Play Store bersih.
+            try:
+                self.device.app_stop("com.android.vending")
+                pause(1)
+            except Exception:
+                pass
             self.device.app_start("com.android.vending")
             # Tunggu Play Store home siap; klik 'Try again' kalau error.
             deadline = time.time() + action_timeout(12)
             ok_home = False
+            blank_since = time.time()
             while time.time() < deadline:
                 if home_ready():
                     ok_home = True
@@ -801,8 +809,22 @@ class EmulatorAutomator:
                             break
                     except Exception:
                         continue
-                if not clicked:
-                    pause(0.4)
+                if clicked:
+                    blank_since = time.time()
+                    continue
+                # Layar BLANK (tidak ada home, tidak ada error) kelamaan -> buka ulang app Play Store.
+                if time.time() - blank_since > float(os.getenv("PLAYSTORE_BLANK_RELAUNCH_SEC", "6")):
+                    self.log_warn(f"Layar blank (attempt {attempt}), buka ulang app Play Store")
+                    self.close_notification_shade()
+                    self.device.press("home")
+                    try:
+                        self.device.app_stop("com.android.vending")
+                        pause(1)
+                    except Exception:
+                        pass
+                    self.device.app_start("com.android.vending")
+                    blank_since = time.time()
+                pause(0.4)
             if not ok_home:
                 self.log_warn(f"Play Store home belum siap (attempt {attempt}/{tries}), restart app")
                 try:
