@@ -315,6 +315,8 @@ async function processOrder(order) {
     const accountProgress = new Map();
     let lastShownPercent = -1;
     let lastEditAt = 0;
+    let batches = []; // [{ round, total, success, status }] untuk tampilan antrian per-batch
+    let successBeforeRoundLive = 0;
 
     const updateRealtimeProgress = async ({ email, percent, label }) => {
       accountProgress.set(email, percent);
@@ -338,8 +340,12 @@ async function processOrder(order) {
       }
       lastShownPercent = overallPercent;
       lastEditAt = now;
+      // Update success batch berjalan (live).
+      if (batches.length) {
+        batches[batches.length - 1].success = Math.max(0, successEmails.size - successBeforeRoundLive);
+      }
       // Update Done (successCount) live ke DB biar /orders & antrian bergerak realtime.
-      await updateOrder(order.id, { successCount: successEmails.size, progressPercent: overallPercent });
+      await updateOrder(order.id, { successCount: successEmails.size, progressPercent: overallPercent, batches });
       const doneEquivalent = (overallPercent / 100) * totalAccounts;
       await editNotify(
         order.telegramId,
@@ -359,10 +365,13 @@ async function processOrder(order) {
       if (accountsToLink.length === 0) break;
 
       writeLines(remainingInputFile, accountsToLink);
+      successBeforeRoundLive = successBeforeRound;
+      batches.push({ round, total: accountsToLink.length, success: 0, status: "RUNNING" });
       await updateOrder(order.id, {
         phase: round === 1 ? "LINKING" : "RETRY_LINKING",
         retryRound: round,
         remainingCount: accountsToLink.length,
+        batches,
       });
       log(
         `order #${order.id} retry round ${round}/${maxRetryRounds}: linking ${accountsToLink.length} account(s), success=${successBeforeRound}/${totalAccounts}`
@@ -399,9 +408,14 @@ async function processOrder(order) {
       const successAfterRound = countLines(resultFile);
       const notRegisteredCountRound = countLines(notRegisteredFile);
       const unverifiedCount = Math.max(0, totalAccounts - successAfterRound - notRegisteredCountRound);
+      if (batches.length) {
+        batches[batches.length - 1].success = Math.max(0, successAfterRound - successBeforeRound);
+        batches[batches.length - 1].status = "DONE";
+      }
       await updateOrder(order.id, {
         successCount: successAfterRound,
         remainingCount: unverifiedCount,
+        batches,
       });
 
       log(`order #${order.id} round ${round} result success=${successAfterRound}/${totalAccounts} sisa=${unverifiedCount}`);

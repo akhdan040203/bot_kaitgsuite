@@ -780,16 +780,24 @@ async function showQueue(chatId, telegramId) {
       orders.length
         ? orders
             .map((order, index) => {
-              const processedCount = order.status === "DONE"
-                ? Number(order.successCount || 0)
-                : Number(order.verifiedCount || order.successCount || 0);
               const statusIcon = order.status === "RUNNING" ? "🟢" : "🕒";
-              return [
-                `${index + 1}. ${statusIcon} <b>${order.status}</b>`,
-                `   📧 ${processedCount}/${order.totalAccounts} gsuite`,
-                `   <code>${miniBar(processedCount, order.totalAccounts)}</code>`,
-                `   🆔 <code>${order.id}</code>`,
-              ].join("\n");
+              const head = `${index + 1}. ${statusIcon} <b>${order.status}</b> — ${order.totalAccounts} akun  🆔 <code>${order.id}</code>`;
+              const batches = Array.isArray(order.batches) ? order.batches : [];
+              if (!batches.length) {
+                return `${head}\n   🕒 Menunggu diproses...`;
+              }
+              const batchLines = batches.map((b) => {
+                const total = Number(b.total || 0);
+                const success = Number(b.success || 0);
+                const done = b.status === "DONE";
+                const pct = done ? 100 : Math.floor((success / Math.max(1, total)) * 100);
+                const label = b.round === 1 ? `Batch ${b.round}` : `Batch ${b.round} (sisa ${total} gsuite)`;
+                return [
+                  `   📦 ${label} — ✅ ${success}/${total} berhasil`,
+                  `   <code>${miniBar(pct, 100)}</code>`,
+                ].join("\n");
+              });
+              return [head, ...batchLines].join("\n");
             })
             .join("\n\n")
         : "Belum ada order paid/proses.",
