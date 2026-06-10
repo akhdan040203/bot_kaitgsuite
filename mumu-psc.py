@@ -997,14 +997,29 @@ class EmulatorAutomator:
 
             pause(3)
 
+            # Verifikasi. Kalau app sempat FORCE-CLOSE ke home (sering pas isi nama / after pay),
+            # cek pertama bisa gagal karena Play Store tidak di halaman payment. PaysafeCard tetap
+            # terikat ke AKUN walau app crash, jadi buka ulang payment methods lalu cek lagi.
+            verified = self.has_paysafecard_payment_method(timeout=8)
+            if not verified:
+                reopen_tries = int(os.getenv("PSC_VERIFY_REOPEN_TRIES", "2"))
+                for vtry in range(1, reopen_tries + 1):
+                    self.log_warn(
+                        f"PaysafeCard belum terdeteksi (mungkin app force-close ke home), "
+                        f"buka ulang payment methods utk verifikasi ({vtry}/{reopen_tries}): {email}"
+                    )
+                    if self.open_payment_methods(email) and self.has_paysafecard_payment_method(timeout=8):
+                        verified = True
+                        break
+
             # Quick success verification - PENTING: Hanya save jika benar-benar berhasil
-            if self.has_paysafecard_payment_method(timeout=8):
+            if verified:
                 self.log_info(f"✅ PaysafeCard successfully added to account {email}")
                 self.emit_progress(email, 100, "berhasil validasi play store")
-                
+
                 # HANYA save ke file hasil jika DOKU benar-benar berhasil ditambahkan
                 self.save_successful_account_safe(email, password)
-                
+
                 # Fast account removal after success
                 if self.fast_remove_google_account(email):
                     self.log_info(f"====== PROCESS COMPLETED SUCCESSFULLY ======")
