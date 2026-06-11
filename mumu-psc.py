@@ -1007,35 +1007,48 @@ class EmulatorAutomator:
                     continue
             return False
 
-        def click_location(idx):
-            # Pilih lokasi untuk percobaan ke-idx. Tiap percobaan pilih city BERBEDA dalam
-            # negara yang sama (biar kalau satu city 'Unable to Connect', city lain dicoba).
-            # 1) Kalau ada daftar city via .env -> pakai nama city persis (paling presisi).
-            if cities:
-                term = cities[idx % len(cities)]
-                try:
-                    if self.device(text=term, className="android.widget.TextView").click_exists(timeout=action_timeout(3)):
-                        self.log_info(f"Pilih lokasi VPN: '{term}'")
-                        return True
-                except Exception:
-                    pass
-            # 2) Dinamis: klik baris ke-idx yang mengandung nama negara (semua city bendera sama).
+        tried_locations = set()  # city yang SUDAH dicoba (termasuk yang 'Try Again') -> jangan diulang.
+
+        def discover_city_labels():
+            # Kumpulkan label city negara ini dari hasil search (TextView mengandung nama negara).
+            labels = []
             try:
                 rows = self.device(textContains=country, className="android.widget.TextView")
-                n = rows.count
-                if n > 0:
-                    i = idx % n
-                    label = ""
+                for i in range(rows.count):
                     try:
-                        label = rows[i].info.get("text", "")
+                        t = (rows[i].info.get("text") or "").strip()
                     except Exception:
-                        pass
-                    rows[i].click()
-                    self.log_info(f"Pilih lokasi VPN baris #{i}/{n} '{label or country}'")
-                    return True
+                        t = ""
+                    if t and t not in labels:
+                        labels.append(t)
             except Exception:
                 pass
-            # 3) Fallback: klik baris negara tepat.
+            # City spesifik (mengandung '-', mis. 'France - Paris') didahulukan daripada baris negara umum.
+            labels.sort(key=lambda s: (0 if "-" in s else 1))
+            return labels
+
+        def click_location(idx):
+            # Pilih city negara order yang BELUM pernah dicoba. City yang 'Try Again' sudah
+            # masuk tried_locations -> otomatis dilewati, pindah ke city LAIN yang (semoga) bisa.
+            pool = []
+            for c in cities:            # daftar .env (kalau ada) didahulukan
+                if c not in pool:
+                    pool.append(c)
+            for c in discover_city_labels():  # lalu city hasil search
+                if c not in pool:
+                    pool.append(c)
+            for term in pool:
+                if term in tried_locations:
+                    continue
+                try:
+                    if self.device(text=term, className="android.widget.TextView").click_exists(timeout=action_timeout(3)):
+                        tried_locations.add(term)
+                        self.log_info(f"Pilih lokasi VPN: '{term}' (city ke-{len(tried_locations)}, belum pernah dicoba)")
+                        return True
+                except Exception:
+                    continue
+            # Semua city sudah dicoba / tidak ketemu -> fallback klik baris negara tepat.
+            self.log_warn(f"Tidak ada city {country} baru yang belum dicoba (sudah coba: {sorted(tried_locations)})")
             return click_country_row()
 
         total_attempts = select_retries + 1
