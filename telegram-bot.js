@@ -1483,6 +1483,8 @@ async function handleMessage(message) {
       await sendMessage(chatId, "Lebih dari 50 akun wajib kirim file .txt.");
       return;
     }
+    // User sudah kirim akun -> hapus pesan instruksi "Format: email|password..." biar bersih, lalu lanjut proses.
+    if (session.promptMessageId) await deleteMessage(chatId, session.promptMessageId);
     await handleParsedKait(chatId, parseGsuiteInput(content));
     return;
   }
@@ -1614,9 +1616,8 @@ async function handleCallback(query) {
   }
 
   if (data === "kait_psc") {
-    sessions.set(String(chatId), { mode: "awaiting_kait" });
     const settings = await settingsStore.read();
-    await sendMessage(
+    const promptMsg = await sendMessage(
       chatId,
       [
         "<b>Format: email|password</b>",
@@ -1628,6 +1629,8 @@ async function handleCallback(query) {
       ].join("\n"),
       { reply_markup: backButton() }
     );
+    // Simpan id pesan instruksi ini -> dihapus begitu user kirim akun (biar chat bersih, lanjut proses).
+    sessions.set(String(chatId), { mode: "awaiting_kait", promptMessageId: promptMsg?.message_id });
     return;
   }
 

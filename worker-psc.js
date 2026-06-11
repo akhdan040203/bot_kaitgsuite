@@ -180,14 +180,12 @@ function renderProgress(order, phase, done, total, detail = "") {
   const filled = Math.round((percent / 100) * segments);
   const bar = "█".repeat(filled) + "░".repeat(segments - filled);
   const displayDone = Number.isInteger(done) ? done : doneNum.toFixed(1);
+  // Realtime ringkas: bar + persen + jumlah gsuite saja.
   return [
     `🔗 <b>Ngait Order #${order.id}</b>`,
-    `<i>${phase}</i>`,
-    "",
-    `<code>${bar}</code>`,
-    `<b>${percent}%</b> • ✅ ${displayDone}/${safeTotal} akun`,
-    detail ? `\n${detail}` : "",
-  ].filter(Boolean).join("\n");
+    `<code>${bar}</code> <b>${percent}%</b>`,
+    `${displayDone}/${safeTotal} gsuite`,
+  ].join("\n");
 }
 
 function runPscWorker(order, attempt, onProgress) {
