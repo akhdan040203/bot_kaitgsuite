@@ -226,16 +226,14 @@ function mainKeyboard() {
   };
 }
 
-function regionMenuKeyboard(currentRegion) {
+function regionMenuKeyboard(currentRegion, settings) {
   const cur = String(currentRegion || "UK").toUpperCase();
+  const enabled = enabledRegions(settings);
   const mark = (r) => (cur === r ? " ✅" : "");
-  return {
-    inline_keyboard: [
-      [{ text: `🇬🇧 UK${mark("UK")}`, callback_data: "region_set_UK" }],
-      [{ text: `🇫🇷 France${mark("FRANCE")}`, callback_data: "region_set_FRANCE" }],
-      [{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }],
-    ],
-  };
+  const labelMap = { UK: "🇬🇧 UK", FRANCE: "🇫🇷 France" };
+  const rows = enabled.map((r) => [{ text: `${labelMap[r] || r}${mark(r)}`, callback_data: `region_set_${r}` }]);
+  rows.push([{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }]);
+  return { inline_keyboard: rows };
 }
 
 function toolbarKeyboard() {
@@ -463,10 +461,35 @@ function regionLabel(region) {
   if (r === "FRANCE") return "🇫🇷 France";
   return "🇬🇧 UK";
 }
-function nextRegion(region) {
-  const r = String(region || "UK").toUpperCase();
-  const idx = REGION_OPTIONS.indexOf(r);
-  return REGION_OPTIONS[(idx + 1) % REGION_OPTIONS.length];
+function disabledRegionsOf(settings) {
+  const d = settings && Array.isArray(settings.disabledRegions) ? settings.disabledRegions : [];
+  return d.map((r) => String(r).toUpperCase());
+}
+function enabledRegions(settings) {
+  const disabled = disabledRegionsOf(settings);
+  const list = REGION_OPTIONS.filter((r) => !disabled.includes(r));
+  return list.length ? list : ["UK"]; // jangan sampai kosong
+}
+function normalizeRegion(region, settings) {
+  const enabled = enabledRegions(settings);
+  const r = String(region || "").toUpperCase();
+  return enabled.includes(r) ? r : enabled[0];
+}
+function nextRegion(region, settings) {
+  const enabled = enabledRegions(settings);
+  const r = String(region || enabled[0]).toUpperCase();
+  const idx = enabled.indexOf(r);
+  return enabled[(idx + 1) % enabled.length];
+}
+function adminRegionKeyboard(settings) {
+  const disabled = disabledRegionsOf(settings);
+  const row = (r, label) => [{
+    text: `${label} — ${disabled.includes(r) ? "🚫 OFF" : "✅ ON"}`,
+    callback_data: `admin_region_toggle_${r}`,
+  }];
+  return {
+    inline_keyboard: [row("UK", "🇬🇧 UK"), row("FRANCE", "🇫🇷 France"), [{ text: "⬅️ Tutup", callback_data: "back_menu" }]],
+  };
 }
 function kaitDraftKeyboard(session) {
   return {
@@ -526,7 +549,7 @@ async function handleParsedKait(chatId, parsed, voucher) {
   const users = await usersStore.read();
   const user = users[String(chatId)];
 
-  const defaultRegion = String((user && user.region) || "UK").toUpperCase();
+  const defaultRegion = normalizeRegion(user && user.region, settings);
   const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion };
   sessions.set(String(chatId), draftSession);
   const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region), {
@@ -568,7 +591,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     id: orderId,
     telegramId: String(from.id),
     username: from.username || "",
-    region: String(session.region || "UK").toUpperCase(),
+    region: normalizeRegion(session.region, settings),
     totalInput: parsed.totalInput,
     totalAccounts: parsed.valid.length,
     invalidAccounts: parsed.invalid.length,
@@ -1000,7 +1023,8 @@ async function handleAdminCommand(chatId, text) {
         "/broadcast pesan",
         "/pause",
         "/resume",
-      ].join("\n")
+      ].join("\n"),
+      { reply_markup: { inline_keyboard: [[{ text: "🌍 Atur Region (ON/OFF)", callback_data: "admin_region" }]] } }
     );
     return true;
   }
@@ -1464,7 +1488,8 @@ async function handleCallback(query) {
 
   if (data === "region_menu") {
     const users = await usersStore.read();
-    const cur = String((users[String(from.id)] || {}).region || "UK").toUpperCase();
+    const settings = await settingsStore.read();
+    const cur = normalizeRegion((users[String(from.id)] || {}).region, settings);
     await tg("editMessageText", {
       chat_id: chatId,
       message_id: query.message?.message_id,
@@ -1474,21 +1499,26 @@ async function handleCallback(query) {
         `Region aktif: <b>${regionLabel(cur)}</b>`,
       ].join("\n"),
       parse_mode: "HTML",
-      reply_markup: regionMenuKeyboard(cur),
+      reply_markup: regionMenuKeyboard(cur, settings),
     }).catch(async () => {
-      await sendMessage(chatId, "🌍 Pilih Region (VPN):", { reply_markup: regionMenuKeyboard(cur) });
+      await sendMessage(chatId, "🌍 Pilih Region:", { reply_markup: regionMenuKeyboard(cur, settings) });
     });
     return;
   }
 
   if (data === "region_set_UK" || data === "region_set_FRANCE") {
-    const region = data === "region_set_FRANCE" ? "FRANCE" : "UK";
+    const settings = await settingsStore.read();
+    const requested = data === "region_set_FRANCE" ? "FRANCE" : "UK";
+    if (!enabledRegions(settings).includes(requested)) {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region ${regionLabel(requested)} sedang dinonaktifkan admin.` }).catch(() => {});
+      return;
+    }
     await usersStore.update((users) => {
       const id = String(from.id);
       if (!users[id]) {
         users[id] = { telegramId: id, username: from.username || "", totalKait: 0, totalSpend: 0, createdAt: new Date().toISOString() };
       }
-      users[id].region = region;
+      users[id].region = requested;
       return users;
     });
     await tg("editMessageText", {
@@ -1497,14 +1527,67 @@ async function handleCallback(query) {
       text: [
         "🌍 <b>Region disimpan!</b>",
         "",
-        `Region aktif: <b>${regionLabel(region)}</b>`,
+        `Region aktif: <b>${regionLabel(requested)}</b>`,
         "",
         "Order Kait PSC berikutnya otomatis pakai region ini. (Masih bisa diganti di draft order sebelum bayar.)",
       ].join("\n"),
       parse_mode: "HTML",
-      reply_markup: regionMenuKeyboard(region),
+      reply_markup: regionMenuKeyboard(requested, settings),
     }).catch(() => {});
-    await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region: ${regionLabel(region)}` }).catch(() => {});
+    await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region: ${regionLabel(requested)}` }).catch(() => {});
+    return;
+  }
+
+  if (data === "admin_region") {
+    if (!isAdmin(chatId)) {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Khusus admin." }).catch(() => {});
+      return;
+    }
+    const settings = await settingsStore.read();
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: query.message?.message_id,
+      text: [
+        "🌍 <b>Atur Region (admin)</b>",
+        "",
+        "Tap untuk ON/OFF. Region OFF tidak bisa dipilih user saat order.",
+      ].join("\n"),
+      parse_mode: "HTML",
+      reply_markup: adminRegionKeyboard(settings),
+    }).catch(async () => {
+      await sendMessage(chatId, "🌍 Atur Region (admin):", { reply_markup: adminRegionKeyboard(settings) });
+    });
+    return;
+  }
+
+  if (data === "admin_region_toggle_UK" || data === "admin_region_toggle_FRANCE") {
+    if (!isAdmin(chatId)) {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Khusus admin." }).catch(() => {});
+      return;
+    }
+    const region = data === "admin_region_toggle_FRANCE" ? "FRANCE" : "UK";
+    const newSettings = await settingsStore.update((s) => {
+      const disabled = disabledRegionsOf(s);
+      let next;
+      if (disabled.includes(region)) {
+        next = disabled.filter((r) => r !== region); // aktifkan
+      } else {
+        next = [...disabled, region]; // nonaktifkan
+        // Jangan sampai semua region OFF.
+        if (next.length >= REGION_OPTIONS.length) {
+          next = next.filter((r) => r !== region);
+        }
+      }
+      s.disabledRegions = next;
+      return s;
+    });
+    const off = disabledRegionsOf(newSettings).includes(region);
+    await tg("editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: query.message?.message_id,
+      reply_markup: adminRegionKeyboard(newSettings),
+    }).catch(() => {});
+    await tg("answerCallbackQuery", { callback_query_id: query.id, text: `${regionLabel(region)}: ${off ? "🚫 OFF" : "✅ ON"}` }).catch(() => {});
     return;
   }
 
@@ -1540,9 +1623,9 @@ async function handleCallback(query) {
       await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Draft order tidak aktif." }).catch(() => {});
       return;
     }
-    session.region = nextRegion(session.region);
-    sessions.set(String(chatId), session);
     const settings = await settingsStore.read();
+    session.region = nextRegion(session.region, settings);
+    sessions.set(String(chatId), session);
     const users = await usersStore.read();
     const user = users[String(from.id)];
     const voucher = session.voucher ? await getActiveVoucher(session.voucher.code) : null;

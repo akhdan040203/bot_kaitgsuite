@@ -776,6 +776,11 @@ class EmulatorAutomator:
             return False
 
         self.log_info(f"Switch VPN region -> {region} (cari '{country}')")
+        # Pulihkan keyboard normal kalau run sebelumnya sempat ganti ke FastInputIME (hilangkan bar aneh).
+        try:
+            self.device.set_fastinput_ime(False)
+        except Exception:
+            pass
         try:
             self.close_notification_shade()
             self.device.press("home")
@@ -816,11 +821,15 @@ class EmulatorAutomator:
 
         dismiss_promo()
 
-        # Sudah Protected & lokasi sesuai region -> tidak perlu ganti.
-        if is_protected() and on_target_location():
-            self.log_info(f"VPN sudah aktif & sesuai region {region}, skip ganti")
-            self.device.press("home")
-            return True
+        # Cek beberapa detik: kalau VPN SUDAH Protected & lokasinya sesuai region (mis. sudah UK),
+        # JANGAN ubah VPN -> langsung lanjut. Beri waktu app render status dulu (emulator lambat).
+        check_deadline = time.time() + action_timeout(int(os.getenv("VPN_ALREADY_CHECK_SEC", "8")))
+        while time.time() < check_deadline:
+            if is_protected() and on_target_location():
+                self.log_info(f"VPN sudah Protected & sesuai region {region}, skip ganti VPN")
+                self.device.press("home")
+                return True
+            pause(1)
 
         try:
             # Buka pemilih lokasi via tombol 'Change' (di kartu Selected Location).
@@ -859,12 +868,14 @@ class EmulatorAutomator:
                         continue
             pause(0.8)
 
-            # Ketik nama negara.
+            # Ketik nama negara pakai set_text (accessibility). JANGAN send_keys:
+            # send_keys mengganti keyboard ke FastInputIME uiautomator -> muncul "bar keyboard"
+            # aneh di emulator & bisa ganggu input proses ngait.
             try:
-                self.device.send_keys(country, clear=True)
+                self.set_text_fast(country, timeout=3, className="android.widget.EditText")
             except Exception:
                 try:
-                    self.set_text_fast(country, timeout=3)
+                    self.device(focused=True).set_text(country)
                 except Exception:
                     pass
             pause(1.8)

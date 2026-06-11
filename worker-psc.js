@@ -447,27 +447,43 @@ async function processOrder(order) {
       }
     }
 
-    // Kalau dibatalkan admin di tengah jalan -> tutup sebagai CANCELLED, bukan DONE.
+    // Kalau dibatalkan admin di tengah jalan -> BERHENTI (tidak lanjut ronde), tutup CANCELLED,
+    // lalu kirim file SUCCESS + file GAGAL (akun sisa yang belum berhasil).
     if (await isOrderCancelled(order.id)) {
       const successCancel = countLines(resultFile);
+      const notRegisteredCancel = readLines(notRegisteredFile);
+      const remainingCancel = subtractLines(originalAccounts, [...readLines(resultFile), ...notRegisteredCancel]);
+      const failedCancel = remainingCancel.length;
+      const gagalFile = path.join(order.orderPath, "gagal.txt");
+      writeLines(gagalFile, remainingCancel);
+
       await updateOrder(order.id, {
         status: "CANCELLED",
         successCount: successCancel,
+        failedCount: failedCancel + notRegisteredCancel.length,
+        remainingCount: failedCancel,
         finishedAt: new Date().toISOString(),
         cancelledByAdmin: true,
       });
-      log(`order #${order.id} DIBATALKAN admin. success=${successCancel}/${totalAccounts}`);
+      log(`order #${order.id} DIBATALKAN admin. success=${successCancel}/${totalAccounts} gagal=${failedCancel}`);
       await editNotify(
         order.telegramId,
         progressMessageId,
-        `❌ <b>Order #${order.id} dibatalkan admin.</b>\nBerhasil ngait: ${successCancel}/${totalAccounts}`
+        `❌ <b>Order #${order.id} dibatalkan admin.</b>\nBerhasil: ${successCancel}/${totalAccounts} • Gagal/belum: ${failedCancel}`
       );
+      // Kirim file hasil ke user: success + gagal.
       if (successCancel > 0) {
-        await sendDocument(order.telegramId, resultFile, `Hasil sebagian order #${order.id} (dibatalkan admin)`);
+        await sendDocument(order.telegramId, resultFile, `✅ Berhasil order #${order.id} — ${successCancel} akun (dibatalkan admin)`);
       }
+      if (failedCancel > 0) {
+        await sendDocument(order.telegramId, gagalFile, `❌ Gagal/belum berhasil order #${order.id} — ${failedCancel} akun (dibatalkan admin)`);
+      }
+      // Admin: notif + file success & gagal.
       for (const adminId of ADMIN_IDS) {
         if (String(adminId) === String(order.telegramId)) continue;
-        await notify(adminId, `[ADMIN] Order #${order.id} dibatalkan. Berhasil: ${successCancel}/${totalAccounts}`);
+        await notify(adminId, `[ADMIN] Order #${order.id} dibatalkan. Berhasil: ${successCancel}/${totalAccounts} • Gagal: ${failedCancel}`);
+        if (successCancel > 0) await sendDocument(adminId, resultFile, `[ADMIN] success #${order.id} (dibatalkan)`).catch(() => {});
+        if (failedCancel > 0) await sendDocument(adminId, gagalFile, `[ADMIN] gagal #${order.id} (dibatalkan)`).catch(() => {});
       }
       await deleteNotify(order.telegramId, progressMessageId);
       if (order.queueMessageId) await deleteNotify(order.telegramId, order.queueMessageId);
