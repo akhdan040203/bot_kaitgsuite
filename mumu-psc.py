@@ -789,21 +789,34 @@ class EmulatorAutomator:
             self.device.set_fastinput_ime(False)
         except Exception:
             pass
-        def app_ready():
-            # App ExpressVPN benar-benar terbuka & UI siap?
+        def in_app():
+            # CEK KETAT: app ExpressVPN benar-benar di DEPAN (foreground), bukan home launcher.
+            # Wajib dipakai sebelum search -> hindari ketik di "Search games & apps" home.
             try:
-                if self.device.app_current().get("package") == pkg:
-                    return True
+                return self.device.app_current().get("package") == pkg
             except Exception:
-                pass
+                return False
+
+        def app_ready():
+            # App ExpressVPN terbuka & UI siap?
+            if in_app():
+                return True
             for t in ["Protected", "Unprotected", "Tap to connect", "VPN Location",
-                      "Selected Location", "Change", "Smart Location", "Try Again"]:
+                      "Selected Location", "Smart Location"]:
                 try:
                     if self.device(textContains=t).exists(timeout=0):
                         return True
                 except Exception:
                     continue
             return False
+
+        def ensure_in_app():
+            # Pastikan kita di dalam ExpressVPN. Kalau di home/app lain -> buka appnya dulu.
+            if in_app():
+                return True
+            self.log_warn("BUKAN di dalam app ExpressVPN (mungkin di home) -> buka app dulu")
+            open_app()
+            return in_app()
 
         def open_app():
             # Buka app ExpressVPN, RETRY sampai 3x kalau belum kebuka/siap.
@@ -1055,12 +1068,16 @@ class EmulatorAutomator:
         for attempt in range(1, total_attempts + 1):
             try:
                 self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{total_attempts}")
-                # Kalau app ketutup/crash di tengah -> buka lagi (retry 3x di dalam open_app).
-                if not app_ready():
-                    self.log_warn("app ExpressVPN tidak di depan -> buka ulang")
-                    if not open_app():
-                        continue
+                # WAJIB: pastikan di DALAM app ExpressVPN dulu (bukan home). Kalau di home -> buka app.
+                if not ensure_in_app():
+                    self.log_warn("Masih belum di dalam app ExpressVPN -> skip percobaan ini")
+                    continue
                 open_change()
+                # GATE: jangan search kalau ternyata ke-luar dari app (mis. balik ke home) -> hindari
+                # ketik di kotak 'Search games & apps' launcher. Buka app lagi kalau perlu.
+                if not ensure_in_app():
+                    self.log_warn("Keluar dari app sebelum search -> buka app lagi, ulangi percobaan")
+                    continue
                 open_search()
                 pause(0.8)
                 type_country()
