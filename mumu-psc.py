@@ -845,25 +845,68 @@ class EmulatorAutomator:
             self.log_warn("Tombol 'Change' lokasi tidak ketemu, coba lanjut search")
             return False
 
-        def open_search():
-            for sid in [f"{pkg}:id/menu_search", f"{pkg}:id/search", f"{pkg}:id/action_search",
-                        f"{pkg}:id/searchView", f"{pkg}:id/search_src_text"]:
+        def search_box_ready():
+            # Kotak ketik search sudah muncul? (EditText fokus / hint 'Search')
+            try:
+                if self.device(className="android.widget.EditText").exists(timeout=0):
+                    return True
+            except Exception:
+                pass
+            for hint in ["Search for country", "Search country", "Search"]:
                 try:
-                    if self.device(resourceId=sid).click_exists(timeout=action_timeout(1)):
+                    if self.device(textContains=hint, className="android.widget.EditText").exists(timeout=0):
                         return True
                 except Exception:
                     continue
-            for s in [
+            return False
+
+        def open_search():
+            # Kalau kotak search sudah terbuka, langsung pakai.
+            if search_box_ready():
+                return True
+            # 1) Ikon kaca pembesar di pojok kanan ATAS (sesuai instruksi): description 'Search'.
+            for sel in [
+                lambda: self.device(description="Search").click_exists(timeout=action_timeout(1)),
                 lambda: self.device(descriptionContains="Search").click_exists(timeout=action_timeout(1)),
+                lambda: self.device(descriptionMatches="(?i).*search.*").click_exists(timeout=action_timeout(1)),
+            ]:
+                try:
+                    if sel():
+                        pause(0.7)
+                        if search_box_ready():
+                            return True
+                except Exception:
+                    continue
+            # 2) resourceId umum tombol/ikon search.
+            for sid in [f"{pkg}:id/menu_search", f"{pkg}:id/search", f"{pkg}:id/action_search",
+                        f"{pkg}:id/searchView", f"{pkg}:id/search_src_text", f"{pkg}:id/search_button",
+                        "android:id/search_button"]:
+                try:
+                    if self.device(resourceId=sid).click_exists(timeout=action_timeout(1)):
+                        pause(0.7)
+                        if search_box_ready():
+                            return True
+                except Exception:
+                    continue
+            try:
+                if self.device(resourceIdMatches="(?i).*(search|cari).*").click_exists(timeout=action_timeout(1)):
+                    pause(0.7)
+                    if search_box_ready():
+                        return True
+            except Exception:
+                pass
+            # 3) Teks/hint 'Search for country'.
+            for s in [
                 lambda: self.device(textContains="Search for country").click_exists(timeout=action_timeout(1)),
                 lambda: self.device(text="Search").click_exists(timeout=action_timeout(1)),
             ]:
                 try:
                     if s():
+                        pause(0.7)
                         return True
                 except Exception:
                     continue
-            return False
+            return search_box_ready()
 
         def type_country():
             # Ketik nama negara pakai set_text (accessibility). JANGAN send_keys (memunculkan
