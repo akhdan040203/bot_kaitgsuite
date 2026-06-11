@@ -867,26 +867,40 @@ async function showQueue(chatId, telegramId) {
 }
 
 async function markOrderPaid(orderId) {
-  let updatedOrder = null;
-  await ordersStore.update((current) =>
-    current.map((order) => {
-      if (
-        String(order.id) !== String(orderId) ||
-        !["WAITING_PAYMENT", "CANCELLED"].includes(order.status)
-      ) {
-        return order;
-      }
-      updatedOrder = {
-        ...order,
-        status: "QUEUED",
-        payment: { ...order.payment, status: "PAID" },
-        paidAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      };
-      log(`payment paid for order #${order.id}; status QUEUED`);
-      return updatedOrder;
-    })
+  const orders = await ordersStore.read();
+  const order = orders.find((o) => String(o.id) === String(orderId));
+  if (!order) return null;
+  // PENTING: order yang DIBATALKAN ADMIN (/batalproses) tidak boleh dihidupkan lagi
+  // oleh pembayaran yang masuk belakangan. Hanya WAITING_PAYMENT atau cancel non-admin
+  // (mis. cancel user/timeout) yang boleh dibayar telat -> masuk antrian.
+  const revivable =
+    order.status === "WAITING_PAYMENT" ||
+    (order.status === "CANCELLED" && !order.cancelledByAdmin);
+  if (!revivable) {
+    log(`payment #${orderId} diabaikan (status=${order.status}, cancelledByAdmin=${!!order.cancelledByAdmin})`);
+    return null;
+  }
+  const num = Number(orderId);
+  const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+  // Atomic + guard status (hanya dari status yang barusan diverifikasi) -> tidak menimpa
+  // pembatalan admin yang mungkin terjadi tepat sebelum update ini.
+  const ok = await ordersStore.patchItem(
+    "id",
+    idValues,
+    { status: "QUEUED", "payment.status": "PAID", paidAt: new Date().toISOString() },
+    { whereField: "status", whereIn: [order.status] }
   );
+  if (!ok) {
+    log(`payment #${orderId} batal di-apply (status berubah sebelum update)`);
+    return null;
+  }
+  const updatedOrder = {
+    ...order,
+    status: "QUEUED",
+    payment: { ...order.payment, status: "PAID" },
+    paidAt: new Date().toISOString(),
+  };
+  log(`payment paid for order #${orderId}; status QUEUED`);
   if (updatedOrder) await consumeOrderBenefits(orderId);
   if (updatedOrder && updatedOrder.paymentChatId && updatedOrder.paymentMessageId) {
     try {
@@ -971,6 +985,7 @@ async function autoCheckPayments() {
       .filter((order) => {
         if (order.status === "WAITING_PAYMENT") return true;
         if (order.status !== "CANCELLED") return false;
+        if (order.cancelledByAdmin) return false; // dibatalkan admin -> FINAL, jangan poll/hidupkan
         if (!order.cancelledAt) return false;
         const cancelledAgeMs = Date.now() - new Date(order.cancelledAt).getTime();
         return Number.isFinite(cancelledAgeMs) && cancelledAgeMs < 10 * 60 * 1000;
@@ -1305,17 +1320,19 @@ async function handleAdminCommand(chatId, text) {
       await sendMessage(chatId, "Format: /batalproses ORDER_ID");
       return true;
     }
-    let target = null;
-    await ordersStore.update((orders) =>
-      orders.map((order) => {
-        if (String(order.id) === String(orderId) && ["QUEUED", "RUNNING", "PAID"].includes(order.status)) {
-          target = order;
-          return { ...order, status: "CANCELLED", cancelledByAdmin: true, cancelledAt: new Date().toISOString() };
-        }
-        return order;
-      })
+    const allOrders = await ordersStore.read();
+    const target = allOrders.find((o) => String(o.id) === String(orderId));
+    const num = Number(orderId);
+    const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+    // Set CANCELLED secara ATOMIC + hanya jika status masih QUEUED/RUNNING/PAID.
+    // Atomic = tidak bisa ketimpa balik oleh tulisan worker (mencegah order "hidup lagi").
+    const cancelled = await ordersStore.patchItem(
+      "id",
+      idValues,
+      { status: "CANCELLED", cancelledByAdmin: true, cancelledAt: new Date().toISOString() },
+      { whereField: "status", whereIn: ["QUEUED", "RUNNING", "PAID"] }
     );
-    if (!target) {
+    if (!cancelled) {
       await sendMessage(chatId, `Order #${orderId} tidak bisa dibatalkan (tidak sedang antri/proses).`);
       return true;
     }

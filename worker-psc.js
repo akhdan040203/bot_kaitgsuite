@@ -88,13 +88,22 @@ async function sendDocument(chatId, filePath, caption) {
   }
 }
 
-async function updateOrder(orderId, patch) {
-  await ordersStore.update((orders) =>
-    orders.map((order) =>
-      String(order.id) === String(orderId)
-        ? { ...order, ...patch, updatedAt: new Date().toISOString() }
-        : order
-    )
+function orderIdValues(orderId) {
+  const num = Number(orderId);
+  const values = [orderId, String(orderId)];
+  if (Number.isFinite(num)) values.push(num);
+  return [...new Set(values)];
+}
+
+// Update field order secara ATOMIC (positional $set), tidak menimpa seluruh array.
+// opts.whereIn (mis. ["QUEUED","PAID"]) -> update hanya jika status order saat ini cocok.
+// Return true kalau benar2 ke-update.
+async function updateOrder(orderId, patch, opts = {}) {
+  return ordersStore.patchItem(
+    "id",
+    orderIdValues(orderId),
+    { ...patch, updatedAt: new Date().toISOString() },
+    opts.whereIn ? { whereField: "status", whereIn: opts.whereIn } : {}
   );
 }
 
@@ -284,7 +293,17 @@ function runPscWorker(order, attempt, onProgress) {
 
 async function processOrder(order) {
   log(`picked order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts}`);
-  await updateOrder(order.id, { status: "RUNNING", startedAt: new Date().toISOString() });
+  // Klaim ATOMIC: hanya QUEUED/PAID -> RUNNING. Kalau order sudah CANCELLED (dibatalkan admin)
+  // atau sudah diambil proses lain, transisi gagal -> JANGAN proses & JANGAN kirim "Mulai ngait".
+  const claimed = await updateOrder(
+    order.id,
+    { status: "RUNNING", startedAt: new Date().toISOString() },
+    { whereIn: ["QUEUED", "PAID"] }
+  );
+  if (!claimed) {
+    log(`order #${order.id} batal diproses (status bukan QUEUED/PAID — kemungkinan sudah dibatalkan/diambil). skip.`);
+    return;
+  }
   log(`order #${order.id} status RUNNING`);
   const initialProgress = await notify(
     order.telegramId,
