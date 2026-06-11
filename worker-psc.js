@@ -200,8 +200,13 @@ function runPscWorker(order, attempt, onProgress) {
     if (process.env.PSC_EMAIL) args.push("--psc-email", process.env.PSC_EMAIL);
     if (process.env.PSC_PASS) args.push("--psc-pass", process.env.PSC_PASS);
 
-    log(`attempt ${attempt}: spawning: ${PYTHON_BIN} ${args.join(" ")}`);
-    const child = spawn(PYTHON_BIN, args, { cwd: __dirname, windowsHide: true });
+    const orderRegion = String(order.region || "UK").toUpperCase();
+    log(`attempt ${attempt}: spawning: ${PYTHON_BIN} ${args.join(" ")} (region=${orderRegion})`);
+    const child = spawn(PYTHON_BIN, args, {
+      cwd: __dirname,
+      windowsHide: true,
+      env: { ...process.env, REGION: orderRegion },
+    });
     let stdoutBuffer = "";
     let stopped = false;
 
@@ -298,8 +303,8 @@ async function processOrder(order) {
       adminId,
       startInputFile,
       isResume
-        ? `[ADMIN] Lanjut (resume) order #${order.id} • sisa ${startCount} akun • user @${order.username || "-"}`
-        : `[ADMIN] Mulai ngait order #${order.id} • ${startCount} akun • user @${order.username || "-"}`
+        ? `[ADMIN] Lanjut (resume) order #${order.id} • 🌍 ${String(order.region || "UK").toUpperCase()} • sisa ${startCount} akun • user @${order.username || "-"}`
+        : `[ADMIN] Mulai ngait order #${order.id} • 🌍 ${String(order.region || "UK").toUpperCase()} • ${startCount} akun • user @${order.username || "-"}`
     );
   }
 

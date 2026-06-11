@@ -221,6 +221,19 @@ function mainKeyboard() {
         { text: "🔄 Convert Format", callback_data: "convert_format" },
         { text: "💬 Bantuan", callback_data: "help" },
       ],
+      [{ text: "🌍 Pilih Region", callback_data: "region_menu" }],
+    ],
+  };
+}
+
+function regionMenuKeyboard(currentRegion) {
+  const cur = String(currentRegion || "UK").toUpperCase();
+  const mark = (r) => (cur === r ? " ✅" : "");
+  return {
+    inline_keyboard: [
+      [{ text: `🇬🇧 UK${mark("UK")}`, callback_data: "region_set_UK" }],
+      [{ text: `🇫🇷 France${mark("FRANCE")}`, callback_data: "region_set_FRANCE" }],
+      [{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }],
     ],
   };
 }
@@ -366,6 +379,7 @@ async function upsertUser(from) {
         firstName: from.first_name || "",
         totalKait: 0,
         totalSpend: 0,
+        region: "UK",
         createdAt: new Date().toISOString(),
       };
     } else {
@@ -443,11 +457,34 @@ async function downloadTelegramFile(fileId) {
   return data;
 }
 
-function buildOrderSummary(parsed, settings, user, voucher) {
+const REGION_OPTIONS = ["UK", "FRANCE"];
+function regionLabel(region) {
+  const r = String(region || "UK").toUpperCase();
+  if (r === "FRANCE") return "🇫🇷 France";
+  return "🇬🇧 UK";
+}
+function nextRegion(region) {
+  const r = String(region || "UK").toUpperCase();
+  const idx = REGION_OPTIONS.indexOf(r);
+  return REGION_OPTIONS[(idx + 1) % REGION_OPTIONS.length];
+}
+function kaitDraftKeyboard(session) {
+  return {
+    inline_keyboard: [
+      [{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }],
+      [{ text: "Buat QRIS", callback_data: "confirm_kait" }],
+      [{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }],
+      [{ text: "Batal", callback_data: "cancel_session" }],
+    ],
+  };
+}
+
+function buildOrderSummary(parsed, settings, user, voucher, region) {
   const p = computeOrderPricing(parsed.valid.length, settings, user, voucher);
   const lines = [
     "<b>Order Kait PSC</b>",
     "",
+    `🌍 Region: <b>${regionLabel(region)}</b>`,
     `Total input: ${parsed.totalInput}`,
     `Valid Gsuite: ${parsed.valid.length}`,
     `Invalid: ${parsed.invalid.length}`,
@@ -489,22 +526,14 @@ async function handleParsedKait(chatId, parsed, voucher) {
   const users = await usersStore.read();
   const user = users[String(chatId)];
 
-  sessions.set(String(chatId), { mode: "confirm_kait", parsed, voucher: voucher || null });
-  const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher), {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "Buat QRIS", callback_data: "confirm_kait" }],
-        [{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }],
-        [{ text: "Batal", callback_data: "cancel_session" }],
-      ],
-    },
+  const defaultRegion = String((user && user.region) || "UK").toUpperCase();
+  const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion };
+  sessions.set(String(chatId), draftSession);
+  const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region), {
+    reply_markup: kaitDraftKeyboard(draftSession),
   });
-  sessions.set(String(chatId), {
-    mode: "confirm_kait",
-    parsed,
-    voucher: voucher || null,
-    draftMessageId: draftMessage.message_id,
-  });
+  draftSession.draftMessageId = draftMessage.message_id;
+  sessions.set(String(chatId), draftSession);
 }
 
 async function createOrderFromSession(chatId, from, callbackMessageId) {
@@ -539,6 +568,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     id: orderId,
     telegramId: String(from.id),
     username: from.username || "",
+    region: String(session.region || "UK").toUpperCase(),
     totalInput: parsed.totalInput,
     totalAccounts: parsed.valid.length,
     invalidAccounts: parsed.invalid.length,
@@ -1203,7 +1233,7 @@ async function handleAdminCommand(chatId, text) {
 
   if (command === "/orders") {
     const allOrders = await ordersStore.read();
-    const orders = allOrders.slice(-20).reverse();
+    const orders = allOrders.slice(-10).reverse();
     const body = orders.length
       ? orders
           .map((order) => {
@@ -1246,7 +1276,7 @@ async function handleAdminCommand(chatId, text) {
   }
 
   if (command === "/batalproses" || command === "/stopproses" || command === "/stop") {
-    const orderId = args[0];
+    const orderId = String(args[0] || "").replace(/^#+/, "").trim();
     if (!orderId) {
       await sendMessage(chatId, "Format: /batalproses ORDER_ID");
       return true;
@@ -1432,6 +1462,52 @@ async function handleCallback(query) {
     return showHome(chatId, from);
   }
 
+  if (data === "region_menu") {
+    const users = await usersStore.read();
+    const cur = String((users[String(from.id)] || {}).region || "UK").toUpperCase();
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: query.message?.message_id,
+      text: [
+        "🌍 <b>Pilih Region</b>",
+        "",
+        `Region aktif: <b>${regionLabel(cur)}</b>`,
+      ].join("\n"),
+      parse_mode: "HTML",
+      reply_markup: regionMenuKeyboard(cur),
+    }).catch(async () => {
+      await sendMessage(chatId, "🌍 Pilih Region (VPN):", { reply_markup: regionMenuKeyboard(cur) });
+    });
+    return;
+  }
+
+  if (data === "region_set_UK" || data === "region_set_FRANCE") {
+    const region = data === "region_set_FRANCE" ? "FRANCE" : "UK";
+    await usersStore.update((users) => {
+      const id = String(from.id);
+      if (!users[id]) {
+        users[id] = { telegramId: id, username: from.username || "", totalKait: 0, totalSpend: 0, createdAt: new Date().toISOString() };
+      }
+      users[id].region = region;
+      return users;
+    });
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: query.message?.message_id,
+      text: [
+        "🌍 <b>Region disimpan!</b>",
+        "",
+        `Region aktif: <b>${regionLabel(region)}</b>`,
+        "",
+        "Order Kait PSC berikutnya otomatis pakai region ini. (Masih bisa diganti di draft order sebelum bayar.)",
+      ].join("\n"),
+      parse_mode: "HTML",
+      reply_markup: regionMenuKeyboard(region),
+    }).catch(() => {});
+    await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region: ${regionLabel(region)}` }).catch(() => {});
+    return;
+  }
+
   if (data === "kait_psc") {
     sessions.set(String(chatId), { mode: "awaiting_kait" });
     const settings = await settingsStore.read();
@@ -1455,6 +1531,29 @@ async function handleCallback(query) {
     await sendMessage(chatId, "Kirim list akun atau upload file .txt untuk convert format.", {
       reply_markup: backButton(),
     });
+    return;
+  }
+
+  if (data === "toggle_region") {
+    const session = sessions.get(String(chatId));
+    if (!session || session.mode !== "confirm_kait") {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Draft order tidak aktif." }).catch(() => {});
+      return;
+    }
+    session.region = nextRegion(session.region);
+    sessions.set(String(chatId), session);
+    const settings = await settingsStore.read();
+    const users = await usersStore.read();
+    const user = users[String(from.id)];
+    const voucher = session.voucher ? await getActiveVoucher(session.voucher.code) : null;
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: session.draftMessageId || query.message?.message_id,
+      text: buildOrderSummary(session.parsed, settings, user, voucher, session.region),
+      parse_mode: "HTML",
+      reply_markup: kaitDraftKeyboard(session),
+    });
+    await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region: ${regionLabel(session.region)}` }).catch(() => {});
     return;
   }
 

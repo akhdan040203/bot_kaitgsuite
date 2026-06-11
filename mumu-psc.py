@@ -754,6 +754,155 @@ class EmulatorAutomator:
         switch_vpn_uk(self.log_warn)
         return False
 
+    def switch_vpn_region(self, region):
+        """Ganti lokasi app ExpressVPN DI DALAM emulator sesuai region order ('UK'/'FRANCE').
+        Sesuai UI ExpressVPN: status 'Protected', kartu 'Selected Location' + tombol 'Change'."""
+        region = str(region or "UK").upper()
+        pkg = os.getenv("EXPRESSVPN_PKG", "com.expressvpn.vpn")
+        # Nama negara untuk dicari di picker lokasi.
+        search_map = {
+            "UK": os.getenv("VPN_COUNTRY_UK", "United Kingdom"),
+            "FRANCE": os.getenv("VPN_COUNTRY_FRANCE", "France"),
+        }
+        # Penanda di kartu 'Selected Location' untuk cek lokasi sekarang sudah sesuai region.
+        match_map = {
+            "UK": [m.strip() for m in os.getenv("VPN_MATCH_UK", "UK -,UK-,United Kingdom").split(",") if m.strip()],
+            "FRANCE": [m.strip() for m in os.getenv("VPN_MATCH_FRANCE", "France -,France-,France").split(",") if m.strip()],
+        }
+        country = search_map.get(region)
+        matches = match_map.get(region, [])
+        if not country:
+            self.log_warn(f"Region '{region}' tidak dikenal, lewati switch VPN")
+            return False
+
+        self.log_info(f"Switch VPN region -> {region} (cari '{country}')")
+        try:
+            self.close_notification_shade()
+            self.device.press("home")
+            self.device.app_start(pkg)
+            pause(action_timeout(5))
+        except Exception as e:
+            self.log_warn(f"Gagal buka app ExpressVPN ({pkg}): {e}")
+            return False
+
+        def is_protected():
+            try:
+                return self.device(textContains="Protected").exists(timeout=0)
+            except Exception:
+                return False
+
+        def on_target_location():
+            for m in matches:
+                try:
+                    if self.device(textContains=m).exists(timeout=0):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        def dismiss_promo():
+            # Tutup kartu promo 'ExpressKeys / Install Now' kalau ada (best-effort).
+            for strat in [
+                lambda: self.device(description="Close").click_exists(timeout=0),
+                lambda: self.device(descriptionContains="Close").click_exists(timeout=0),
+                lambda: self.device(descriptionContains="Dismiss").click_exists(timeout=0),
+            ]:
+                try:
+                    if strat():
+                        pause(0.5)
+                        return
+                except Exception:
+                    continue
+
+        dismiss_promo()
+
+        # Sudah Protected & lokasi sesuai region -> tidak perlu ganti.
+        if is_protected() and on_target_location():
+            self.log_info(f"VPN sudah aktif & sesuai region {region}, skip ganti")
+            self.device.press("home")
+            return True
+
+        try:
+            # Buka pemilih lokasi via tombol 'Change' (di kartu Selected Location).
+            opened = False
+            for t in ["Change", "Choose Location", "Choose location", "Change Location"]:
+                try:
+                    if self.device(textContains=t).click_exists(timeout=action_timeout(1)):
+                        opened = True
+                        pause(1.5)
+                        break
+                except Exception:
+                    continue
+            if not opened:
+                self.log_warn("Tombol 'Change' lokasi tidak ketemu, coba lanjut search")
+
+            # Buka kotak search di picker lokasi.
+            searched = False
+            for sid in [f"{pkg}:id/menu_search", f"{pkg}:id/search", f"{pkg}:id/action_search",
+                        f"{pkg}:id/searchView", f"{pkg}:id/search_src_text"]:
+                try:
+                    if self.device(resourceId=sid).click_exists(timeout=action_timeout(1)):
+                        searched = True
+                        break
+                except Exception:
+                    continue
+            if not searched:
+                for s in [
+                    lambda: self.device(descriptionContains="Search").click_exists(timeout=action_timeout(1)),
+                    lambda: self.device(textContains="Search for country").click_exists(timeout=action_timeout(1)),
+                    lambda: self.device(text="Search").click_exists(timeout=action_timeout(1)),
+                ]:
+                    try:
+                        if s():
+                            break
+                    except Exception:
+                        continue
+            pause(0.8)
+
+            # Ketik nama negara.
+            try:
+                self.device.send_keys(country, clear=True)
+            except Exception:
+                try:
+                    self.set_text_fast(country, timeout=3)
+                except Exception:
+                    pass
+            pause(1.8)
+
+            # Klik hasil negara.
+            try:
+                self.device(textContains=country).click_exists(timeout=action_timeout(3))
+            except Exception:
+                pass
+            pause(action_timeout(4))
+
+            # Konfirmasi pindah lokasi kalau muncul dialog.
+            for c in ["Continue", "OK", "Yes", "Switch"]:
+                try:
+                    if self.device(text=c).click_exists(timeout=0):
+                        break
+                except Exception:
+                    continue
+
+            # Tunggu Protected + lokasi sesuai region.
+            deadline = time.time() + action_timeout(int(os.getenv("VPN_CONNECT_WAIT_SEC", "45")))
+            while time.time() < deadline:
+                if is_protected() and on_target_location():
+                    self.log_info(f"VPN Protected & sesuai region {region}")
+                    self.device.press("home")
+                    return True
+                pause(1.5)
+            self.log_warn(f"VPN belum Protected sesuai region {region} dalam batas waktu (lanjut apa adanya)")
+            self.device.press("home")
+            return False
+        except Exception as e:
+            self.log_warn(f"Gagal switch VPN region: {e}")
+            try:
+                self.device.press("home")
+            except Exception:
+                pass
+            return False
+
     def open_payment_methods(self, email):
         """Buka Play Store app lalu navigasi ke Payment methods (cara reliable, tidak blank).
         Tunggu home siap + tangani 'Try again' sebelum navigasi."""
@@ -1241,6 +1390,14 @@ def fast_process_emulator(automator):
     """Optimized emulator processing with better error handling"""
     if automator.device is None and not automator.connect():
         return
+
+    # Ganti VPN ke region order ini (semua emulator pakai region yang sama per order).
+    region = os.getenv("REGION", "UK")
+    if os.getenv("VPN_SWITCH_ENABLED", "1") not in ("0", "false", "False"):
+        try:
+            automator.switch_vpn_region(region)
+        except Exception as e:
+            automator.log_warn(f"switch_vpn_region error (lanjut): {e}")
 
     processed_count = 0
     success_count = 0
