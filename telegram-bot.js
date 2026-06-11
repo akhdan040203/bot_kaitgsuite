@@ -759,6 +759,11 @@ async function retryFailedOrder(chatId, from, sourceOrderId, callbackMessageId) 
     await sendMessage(chatId, "Order ini bukan punyamu.");
     return;
   }
+  // Order yang DIBATALKAN tidak bisa di-retry — sisa akun sudah dikembalikan sbg credit, harus order ulang.
+  if (src.status === "CANCELLED" || src.cancelledByAdmin) {
+    await sendMessage(chatId, "Order ini sudah dibatalkan dan tidak bisa di-retry. Akun sisa sudah dikembalikan sebagai credit — silakan buat order baru.");
+    return;
+  }
   let content = "";
   try {
     content = fs.readFileSync(path.join(src.orderPath, "remaining-unverified.txt"), "utf-8");

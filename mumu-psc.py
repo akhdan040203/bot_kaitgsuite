@@ -831,88 +831,130 @@ class EmulatorAutomator:
                 return True
             pause(1)
 
-        try:
-            # Buka pemilih lokasi via tombol 'Change' (di kartu Selected Location).
-            opened = False
+        select_retries = int(os.getenv("VPN_SELECT_RETRIES", "2"))
+        connect_wait = int(os.getenv("VPN_CONNECT_WAIT_SEC", "45"))
+
+        def open_change():
             for t in ["Change", "Choose Location", "Choose location", "Change Location"]:
                 try:
                     if self.device(textContains=t).click_exists(timeout=action_timeout(1)):
-                        opened = True
                         pause(1.5)
-                        break
+                        return True
                 except Exception:
                     continue
-            if not opened:
-                self.log_warn("Tombol 'Change' lokasi tidak ketemu, coba lanjut search")
+            self.log_warn("Tombol 'Change' lokasi tidak ketemu, coba lanjut search")
+            return False
 
-            # Buka kotak search di picker lokasi.
-            searched = False
+        def open_search():
             for sid in [f"{pkg}:id/menu_search", f"{pkg}:id/search", f"{pkg}:id/action_search",
                         f"{pkg}:id/searchView", f"{pkg}:id/search_src_text"]:
                 try:
                     if self.device(resourceId=sid).click_exists(timeout=action_timeout(1)):
-                        searched = True
-                        break
+                        return True
                 except Exception:
                     continue
-            if not searched:
-                for s in [
-                    lambda: self.device(descriptionContains="Search").click_exists(timeout=action_timeout(1)),
-                    lambda: self.device(textContains="Search for country").click_exists(timeout=action_timeout(1)),
-                    lambda: self.device(text="Search").click_exists(timeout=action_timeout(1)),
-                ]:
+            for s in [
+                lambda: self.device(descriptionContains="Search").click_exists(timeout=action_timeout(1)),
+                lambda: self.device(textContains="Search for country").click_exists(timeout=action_timeout(1)),
+                lambda: self.device(text="Search").click_exists(timeout=action_timeout(1)),
+            ]:
+                try:
+                    if s():
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        def type_country():
+            # Ketik nama negara pakai set_text (accessibility). JANGAN send_keys (memunculkan
+            # bar keyboard FastInputIME yang bisa ganggu proses ngait).
+            try:
+                if self.set_text_fast(country, timeout=3, className="android.widget.EditText"):
+                    return
+            except Exception:
+                pass
+            try:
+                self.device(focused=True).set_text(country)
+            except Exception:
+                pass
+
+        def click_country_row():
+            # Klik BARIS negara secara TEPAT. WAJIB className TextView supaya TIDAK meng-klik
+            # kotak search (EditText) yang isinya teks "France"/"United Kingdom" yang barusan
+            # diketik -> ini penyebab utama "salah negara".
+            selectors = [
+                dict(text=country, className="android.widget.TextView", clickable=True),
+                dict(text=country, className="android.widget.TextView"),
+                dict(textMatches=f"(?i)^{re.escape(country)}$", className="android.widget.TextView"),
+                dict(textStartsWith=country, className="android.widget.TextView"),
+            ]
+            for sel in selectors:
+                try:
+                    if self.device(**sel).click_exists(timeout=action_timeout(3)):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        for attempt in range(1, select_retries + 2):
+            try:
+                self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{select_retries + 1}")
+                open_change()
+                open_search()
+                pause(0.8)
+                type_country()
+                pause(1.8)
+                if not click_country_row():
+                    self.log_warn(f"Baris negara '{country}' tidak ke-klik (percobaan {attempt})")
+                pause(action_timeout(4))
+
+                # Konfirmasi pindah lokasi kalau muncul dialog.
+                for c in ["Continue", "OK", "Yes", "Switch"]:
                     try:
-                        if s():
+                        if self.device(text=c).click_exists(timeout=0):
                             break
                     except Exception:
                         continue
-            pause(0.8)
 
-            # Ketik nama negara pakai set_text (accessibility). JANGAN send_keys:
-            # send_keys mengganti keyboard ke FastInputIME uiautomator -> muncul "bar keyboard"
-            # aneh di emulator & bisa ganggu input proses ngait.
-            try:
-                self.set_text_fast(country, timeout=3, className="android.widget.EditText")
-            except Exception:
-                try:
-                    self.device(focused=True).set_text(country)
-                except Exception:
-                    pass
-            pause(1.8)
-
-            # Klik hasil negara.
-            try:
-                self.device(textContains=country).click_exists(timeout=action_timeout(3))
-            except Exception:
-                pass
-            pause(action_timeout(4))
-
-            # Konfirmasi pindah lokasi kalau muncul dialog.
-            for c in ["Continue", "OK", "Yes", "Switch"]:
-                try:
-                    if self.device(text=c).click_exists(timeout=0):
+                # Tunggu sampai Protected.
+                deadline = time.time() + action_timeout(connect_wait)
+                protected = False
+                while time.time() < deadline:
+                    if is_protected():
+                        protected = True
                         break
-                except Exception:
-                    continue
+                    pause(1.5)
 
-            # Tunggu Protected + lokasi sesuai region.
-            deadline = time.time() + action_timeout(int(os.getenv("VPN_CONNECT_WAIT_SEC", "45")))
-            while time.time() < deadline:
-                if is_protected() and on_target_location():
-                    self.log_info(f"VPN Protected & sesuai region {region}")
+                # VERIFIKASI negara benar. Protected tapi negara salah -> retry (ini yang bikin "ngaco").
+                pause(1.0)
+                if protected and on_target_location():
+                    self.log_info(f"VPN Protected & sesuai region {region} (verified)")
                     self.device.press("home")
                     return True
-                pause(1.5)
-            self.log_warn(f"VPN belum Protected sesuai region {region} dalam batas waktu (lanjut apa adanya)")
+                if protected:
+                    self.log_warn(f"VPN Protected TAPI negara TIDAK cocok {region} (kemungkinan salah negara) -> retry")
+                else:
+                    self.log_warn(f"VPN belum Protected untuk {region} -> retry")
+                # Kembali ke layar utama app untuk percobaan berikutnya.
+                try:
+                    self.device.press("back")
+                    pause(1.2)
+                except Exception:
+                    pass
+            except Exception as e:
+                self.log_warn(f"Gagal switch VPN region (percobaan {attempt}): {e}")
+                try:
+                    self.device.press("back")
+                    pause(1)
+                except Exception:
+                    pass
+
+        self.log_warn(f"VPN gagal pindah ke region {region} setelah {select_retries + 1} percobaan (lanjut apa adanya)")
+        try:
             self.device.press("home")
-            return False
-        except Exception as e:
-            self.log_warn(f"Gagal switch VPN region: {e}")
-            try:
-                self.device.press("home")
-            except Exception:
-                pass
-            return False
+        except Exception:
+            pass
+        return False
 
     def open_payment_methods(self, email):
         """Buka Play Store app lalu navigasi ke Payment methods (cara reliable, tidak blank).

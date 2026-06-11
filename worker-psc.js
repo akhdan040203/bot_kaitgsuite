@@ -485,6 +485,19 @@ async function processOrder(order) {
         cancelledByAdmin: true,
       });
       log(`order #${order.id} DIBATALKAN admin. success=${successCancel}/${totalAccounts} gagal=${failedCancel}`);
+
+      // Refund: akun sisa yang BELUM/gagal diproses -> +credit (bisa dipakai ngait gratis order berikutnya).
+      // Akun yang sudah berhasil tetap dihitung totalKait. Order ini FINAL (tidak bisa retry).
+      const refundCancel = failedCancel > 0 ? failedCancel : 0;
+      await usersStore.update((users) => {
+        const user = users[order.telegramId];
+        if (user) {
+          user.totalKait = Number(user.totalKait || 0) + successCancel;
+          if (refundCancel > 0) user.credit = Number(user.credit || 0) + refundCancel;
+        }
+        return users;
+      });
+
       await editNotify(
         order.telegramId,
         progressMessageId,
@@ -497,6 +510,20 @@ async function processOrder(order) {
       if (failedCancel > 0) {
         await sendDocument(order.telegramId, gagalFile, `❌ Gagal/belum berhasil order #${order.id} — ${failedCancel} akun (dibatalkan admin)`);
       }
+      await notify(
+        order.telegramId,
+        [
+          `Order #${order.id} dibatalkan admin.`,
+          "",
+          `Total: ${totalAccounts}`,
+          `Berhasil (dikirim): ${successCancel}`,
+          `Gagal/belum diproses: ${failedCancel}`,
+          refundCancel
+            ? `\n🎁 ${refundCancel} akun sisa → +${refundCancel} credit ngait (otomatis dipakai gratis di order berikutnya).`
+            : "",
+          "\n⚠️ Order yang dibatalkan tidak bisa di-retry. Silakan order ulang untuk akun sisa.",
+        ].filter(Boolean).join("\n")
+      );
       // Admin: notif + file success & gagal.
       for (const adminId of ADMIN_IDS) {
         if (String(adminId) === String(order.telegramId)) continue;
