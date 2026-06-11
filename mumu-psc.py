@@ -769,16 +769,22 @@ class EmulatorAutomator:
             "UK": [m.strip() for m in os.getenv("VPN_MATCH_UK", "UK -,UK-,United Kingdom").split(",") if m.strip()],
             "FRANCE": [m.strip() for m in os.getenv("VPN_MATCH_FRANCE", "France -,France-,France").split(",") if m.strip()],
         }
-        # Daftar city alternatif per region. Kalau satu city 'Unable to Connect',
-        # percobaan berikutnya pilih city lain (dalam negara/ bendera yang sama).
-        # Bisa di-override .env (pisah koma), mis. VPN_CITIES_FRANCE="France - Paris,France - Strasbourg".
+        # Daftar city pilihan per region (URUT prioritas). City pertama dicoba duluan.
+        # France: UTAMAKAN 'France - Alsace' (paling bagus/stabil). Bisa di-override via .env.
         city_map = {
             "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "").split(",") if c.strip()],
-            "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "").split(",") if c.strip()],
+            "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "France - Alsace").split(",") if c.strip()],
+        }
+        # City yang DILARANG dipilih per region (kalau city utama gagal, jangan jatuh ke sini).
+        # France: JANGAN pakai Paris.
+        exclude_map = {
+            "UK": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_UK", "").split(",") if x.strip()],
+            "FRANCE": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_FRANCE", "Paris").split(",") if x.strip()],
         }
         country = search_map.get(region)
         matches = match_map.get(region, [])
         cities = city_map.get(region, [])
+        excludes = exclude_map.get(region, [])
         if not country:
             self.log_warn(f"Region '{region}' tidak dikenal, lewati switch VPN")
             return False
@@ -1018,6 +1024,11 @@ class EmulatorAutomator:
 
         tried_locations = set()  # city yang SUDAH dicoba (termasuk yang 'Try Again') -> jangan diulang.
 
+        def is_excluded(label):
+            # City terlarang (mis. Paris untuk France) -> jangan dipilih.
+            low = (label or "").lower()
+            return any(x in low for x in excludes)
+
         def discover_city_labels():
             # Kumpulkan label city negara ini dari hasil search (TextView mengandung nama negara).
             labels = []
@@ -1028,20 +1039,21 @@ class EmulatorAutomator:
                         t = (rows[i].info.get("text") or "").strip()
                     except Exception:
                         t = ""
-                    if t and t not in labels:
+                    if t and t not in labels and not is_excluded(t):
                         labels.append(t)
             except Exception:
                 pass
-            # City spesifik (mengandung '-', mis. 'France - Paris') didahulukan daripada baris negara umum.
+            # City spesifik (mengandung '-', mis. 'France - Alsace') didahulukan daripada baris negara umum.
             labels.sort(key=lambda s: (0 if "-" in s else 1))
             return labels
 
         def click_location(idx):
             # Pilih city negara order yang BELUM pernah dicoba. City yang 'Try Again' sudah
             # masuk tried_locations -> otomatis dilewati, pindah ke city LAIN yang (semoga) bisa.
+            # City terlarang (Paris utk France) dilewati.
             pool = []
-            for c in cities:            # daftar .env (kalau ada) didahulukan
-                if c not in pool:
+            for c in cities:            # daftar prioritas (.env / default Alsace) didahulukan
+                if c not in pool and not is_excluded(c):
                     pool.append(c)
             for c in discover_city_labels():  # lalu city hasil search
                 if c not in pool:
