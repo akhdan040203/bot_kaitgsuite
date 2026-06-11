@@ -789,13 +789,46 @@ class EmulatorAutomator:
             self.device.set_fastinput_ime(False)
         except Exception:
             pass
-        try:
-            self.close_notification_shade()
-            self.device.press("home")
-            self.device.app_start(pkg)
-            pause(action_timeout(5))
-        except Exception as e:
-            self.log_warn(f"Gagal buka app ExpressVPN ({pkg}): {e}")
+        def app_ready():
+            # App ExpressVPN benar-benar terbuka & UI siap?
+            try:
+                if self.device.app_current().get("package") == pkg:
+                    return True
+            except Exception:
+                pass
+            for t in ["Protected", "Unprotected", "Tap to connect", "VPN Location",
+                      "Selected Location", "Change", "Smart Location", "Try Again"]:
+                try:
+                    if self.device(textContains=t).exists(timeout=0):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        def open_app():
+            # Buka app ExpressVPN, RETRY sampai 3x kalau belum kebuka/siap.
+            tries = int(os.getenv("VPN_OPEN_TRIES", "3"))
+            for i in range(1, tries + 1):
+                try:
+                    self.close_notification_shade()
+                    self.device.press("home")
+                    self.device.app_start(pkg)
+                    pause(action_timeout(5))
+                except Exception as e:
+                    self.log_warn(f"buka app ExpressVPN gagal (percobaan {i}/{tries}): {e}")
+                if app_ready():
+                    self.log_info(f"app ExpressVPN terbuka & siap (percobaan {i}/{tries})")
+                    return True
+                self.log_warn(f"app ExpressVPN belum siap -> retry buka ({i}/{tries})")
+                try:
+                    self.device.app_stop(pkg)  # force-stop lalu start ulang
+                except Exception:
+                    pass
+                pause(1.5)
+            self.log_warn(f"app ExpressVPN tidak bisa dibuka setelah {tries}x")
+            return False
+
+        if not open_app():
             return False
 
         def is_protected():
@@ -821,13 +854,20 @@ class EmulatorAutomator:
                         return True
                 except Exception:
                     continue
+            # Tombol 'Try Again' muncul = layar error koneksi.
+            try:
+                if self.device(text="Try Again").exists(timeout=0) or self.device(textContains="Try Again").exists(timeout=0):
+                    return True
+            except Exception:
+                pass
             return False
 
         def dismiss_error():
-            # Tutup layar 'Unable to Connect' -> Cancel (supaya bisa pilih city lain).
-            for t in ["Cancel", "Close", "OK", "Dismiss"]:
+            # Tutup layar error -> utamakan 'Close' (sesuai permintaan), lalu Cancel/OK.
+            for t in ["Close", "Cancel", "OK", "Dismiss"]:
                 try:
                     if self.device(text=t).click_exists(timeout=0):
+                        self.log_info(f"tutup error VPN via '{t}'")
                         pause(1.0)
                         return
                 except Exception:
@@ -859,7 +899,7 @@ class EmulatorAutomator:
                 return True
             pause(1)
 
-        select_retries = int(os.getenv("VPN_SELECT_RETRIES", "3"))
+        select_retries = int(os.getenv("VPN_SELECT_RETRIES", "4"))  # total 5 percobaan switch city
         connect_wait = int(os.getenv("VPN_CONNECT_WAIT_SEC", "45"))
 
         def open_change():
@@ -1002,6 +1042,11 @@ class EmulatorAutomator:
         for attempt in range(1, total_attempts + 1):
             try:
                 self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{total_attempts}")
+                # Kalau app ketutup/crash di tengah -> buka lagi (retry 3x di dalam open_app).
+                if not app_ready():
+                    self.log_warn("app ExpressVPN tidak di depan -> buka ulang")
+                    if not open_app():
+                        continue
                 open_change()
                 open_search()
                 pause(0.8)
