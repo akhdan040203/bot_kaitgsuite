@@ -841,9 +841,6 @@ class EmulatorAutomator:
             self.log_warn(f"app ExpressVPN tidak bisa dibuka setelah {tries}x")
             return False
 
-        if not open_app():
-            return False
-
         def is_protected():
             try:
                 return self.device(textContains="Protected").exists(timeout=0)
@@ -900,17 +897,16 @@ class EmulatorAutomator:
                 except Exception:
                     continue
 
-        dismiss_promo()
-
-        # Cek beberapa detik: kalau VPN SUDAH Protected & lokasinya sesuai region (mis. sudah UK),
-        # JANGAN ubah VPN -> langsung lanjut. Beri waktu app render status dulu (emulator lambat).
-        check_deadline = time.time() + action_timeout(int(os.getenv("VPN_ALREADY_CHECK_SEC", "8")))
-        while time.time() < check_deadline:
-            if is_protected() and on_target_location():
-                self.log_info(f"VPN sudah Protected & sesuai region {region}, skip ganti VPN")
-                self.device.press("home")
-                return True
-            pause(1)
+        def already_correct():
+            # Cek beberapa detik: kalau VPN SUDAH Protected & lokasi sesuai region -> tidak perlu ubah.
+            deadline0 = time.time() + action_timeout(int(os.getenv("VPN_ALREADY_CHECK_SEC", "8")))
+            while time.time() < deadline0:
+                if is_protected() and on_target_location():
+                    self.log_info(f"VPN sudah Protected & sesuai region {region}, skip ganti VPN")
+                    self.device.press("home")
+                    return True
+                pause(1)
+            return False
 
         select_retries = int(os.getenv("VPN_SELECT_RETRIES", "4"))  # total 5 percobaan switch city
         connect_wait = int(os.getenv("VPN_CONNECT_WAIT_SEC", "45"))
@@ -1064,86 +1060,113 @@ class EmulatorAutomator:
             self.log_warn(f"Tidak ada city {country} baru yang belum dicoba (sudah coba: {sorted(tried_locations)})")
             return click_country_row()
 
-        total_attempts = select_retries + 1
-        for attempt in range(1, total_attempts + 1):
-            try:
-                self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{total_attempts}")
-                # WAJIB: pastikan di DALAM app ExpressVPN dulu (bukan home). Kalau di home -> buka app.
-                if not ensure_in_app():
-                    self.log_warn("Masih belum di dalam app ExpressVPN -> skip percobaan ini")
-                    continue
-                open_change()
-                # GATE: jangan search kalau ternyata ke-luar dari app (mis. balik ke home) -> hindari
-                # ketik di kotak 'Search games & apps' launcher. Buka app lagi kalau perlu.
-                if not ensure_in_app():
-                    self.log_warn("Keluar dari app sebelum search -> buka app lagi, ulangi percobaan")
-                    continue
-                open_search()
-                pause(0.8)
-                type_country()
-                pause(1.8)
-                # Tiap percobaan pilih city berbeda (idx = attempt-1).
-                if not click_location(attempt - 1):
-                    self.log_warn(f"Lokasi '{country}' tidak ke-klik (percobaan {attempt})")
-                pause(action_timeout(4))
+        def switch_city_loop():
+            # Coba switch ke beberapa city (beda tiap percobaan) sampai Protected & region terverifikasi.
+            total_attempts = select_retries + 1
+            for attempt in range(1, total_attempts + 1):
+                try:
+                    self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{total_attempts}")
+                    # WAJIB: pastikan di DALAM app ExpressVPN dulu (bukan home). Kalau di home -> buka app.
+                    if not ensure_in_app():
+                        self.log_warn("Masih belum di dalam app ExpressVPN -> skip percobaan ini")
+                        continue
+                    open_change()
+                    # GATE: jangan search kalau ternyata ke-luar dari app (mis. balik ke home) -> hindari
+                    # ketik di kotak 'Search games & apps' launcher. Buka app lagi kalau perlu.
+                    if not ensure_in_app():
+                        self.log_warn("Keluar dari app sebelum search -> buka app lagi, ulangi percobaan")
+                        continue
+                    open_search()
+                    pause(0.8)
+                    type_country()
+                    pause(1.8)
+                    # Tiap percobaan pilih city berbeda (idx = attempt-1).
+                    if not click_location(attempt - 1):
+                        self.log_warn(f"Lokasi '{country}' tidak ke-klik (percobaan {attempt})")
+                    pause(action_timeout(4))
 
-                # Konfirmasi pindah lokasi kalau muncul dialog.
-                for c in ["Continue", "OK", "Yes", "Switch"]:
-                    try:
-                        if self.device(text=c).click_exists(timeout=0):
+                    # Konfirmasi pindah lokasi kalau muncul dialog.
+                    for c in ["Continue", "OK", "Yes", "Switch"]:
+                        try:
+                            if self.device(text=c).click_exists(timeout=0):
+                                break
+                        except Exception:
+                            continue
+
+                    # Tunggu sampai Protected ATAU muncul error 'Unable to Connect'.
+                    deadline = time.time() + action_timeout(connect_wait)
+                    protected = False
+                    errored = False
+                    while time.time() < deadline:
+                        if is_protected():
+                            protected = True
                             break
-                    except Exception:
+                        if is_unable_to_connect():
+                            errored = True
+                            break
+                        pause(1.5)
+
+                    # Error 'Unable to Connect' -> tutup (Close) & coba CITY LAIN di percobaan berikutnya.
+                    if errored:
+                        self.log_warn(f"'Unable to Connect' untuk {region} -> coba city lain (percobaan berikutnya)")
+                        dismiss_error()
+                        try:
+                            self.device.press("back")
+                            pause(1.2)
+                        except Exception:
+                            pass
                         continue
 
-                # Tunggu sampai Protected ATAU muncul error 'Unable to Connect'.
-                deadline = time.time() + action_timeout(connect_wait)
-                protected = False
-                errored = False
-                while time.time() < deadline:
-                    if is_protected():
-                        protected = True
-                        break
-                    if is_unable_to_connect():
-                        errored = True
-                        break
-                    pause(1.5)
-
-                # Error 'Unable to Connect' -> tutup (Cancel) & coba CITY LAIN di percobaan berikutnya.
-                if errored:
-                    self.log_warn(f"'Unable to Connect' untuk {region} -> coba city lain (percobaan berikutnya)")
-                    dismiss_error()
+                    # VERIFIKASI negara benar. Protected tapi negara salah -> retry city lain.
+                    pause(1.0)
+                    if protected and on_target_location():
+                        self.log_info(f"VPN Protected & sesuai region {region} (verified)")
+                        self.device.press("home")
+                        return True
+                    if protected:
+                        self.log_warn(f"VPN Protected TAPI negara TIDAK cocok {region} -> retry")
+                    else:
+                        self.log_warn(f"VPN belum Protected untuk {region} -> retry")
                     try:
                         self.device.press("back")
                         pause(1.2)
                     except Exception:
                         pass
-                    continue
+                except Exception as e:
+                    self.log_warn(f"Gagal switch VPN region (percobaan {attempt}): {e}")
+                    try:
+                        self.device.press("back")
+                        pause(1)
+                    except Exception:
+                        pass
+            return False
 
-                # VERIFIKASI negara benar. Protected tapi negara salah -> retry (ini yang bikin "ngaco").
-                pause(1.0)
-                if protected and on_target_location():
-                    self.log_info(f"VPN Protected & sesuai region {region} (verified)")
-                    self.device.press("home")
-                    return True
-                if protected:
-                    self.log_warn(f"VPN Protected TAPI negara TIDAK cocok {region} (kemungkinan salah negara) -> retry")
-                else:
-                    self.log_warn(f"VPN belum Protected untuk {region} -> retry")
-                # Kembali ke layar utama app untuk percobaan berikutnya.
-                try:
-                    self.device.press("back")
-                    pause(1.2)
-                except Exception:
-                    pass
-            except Exception as e:
-                self.log_warn(f"Gagal switch VPN region (percobaan {attempt}): {e}")
-                try:
-                    self.device.press("back")
-                    pause(1)
-                except Exception:
-                    pass
+        # ===== OUTER LOOP: ulang dari OPEN (buka app + switch + CROSSCHECK region) sampai sesuai request.
+        # Kalau di tengah app blank / ke-close / balik ke home -> putaran berikutnya buka app lagi & ulang.
+        outer_tries = int(os.getenv("VPN_OUTER_TRIES", "3"))
+        for rnd in range(1, outer_tries + 1):
+            self.log_info(f"=== VPN region {region}: putaran {rnd}/{outer_tries} (open + switch + crosscheck) ===")
+            tried_locations.clear()  # reset daftar city yang sudah dicoba tiap kali buka ulang
+            # 1) Buka app ExpressVPN (retry 3x di dalam). Gagal -> ulang putaran (buka lagi).
+            if not open_app():
+                self.log_warn("buka app ExpressVPN gagal -> ulang dari open")
+                continue
+            dismiss_promo()
+            # 2) CROSSCHECK awal: sudah Protected & region sesuai? -> langsung lanjut ngait.
+            if already_correct():
+                return True
+            # 3) Switch city sampai Protected & region terverifikasi.
+            if switch_city_loop():
+                return True
+            # 4) Region masih beda / app sempat blank-close -> ULANG dari open (putaran berikutnya).
+            self.log_warn(f"region {region} BELUM sesuai setelah putaran {rnd} -> ulang dari OPEN app")
+            try:
+                self.device.press("home")
+                pause(1)
+            except Exception:
+                pass
 
-        self.log_warn(f"VPN gagal pindah ke region {region} setelah {select_retries + 1} percobaan (lanjut apa adanya)")
+        self.log_warn(f"VPN GAGAL sesuai region {region} setelah {outer_tries} putaran (lanjut apa adanya)")
         try:
             self.device.press("home")
         except Exception:
