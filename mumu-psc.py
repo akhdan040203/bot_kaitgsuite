@@ -769,8 +769,16 @@ class EmulatorAutomator:
             "UK": [m.strip() for m in os.getenv("VPN_MATCH_UK", "UK -,UK-,United Kingdom").split(",") if m.strip()],
             "FRANCE": [m.strip() for m in os.getenv("VPN_MATCH_FRANCE", "France -,France-,France").split(",") if m.strip()],
         }
+        # Daftar city alternatif per region. Kalau satu city 'Unable to Connect',
+        # percobaan berikutnya pilih city lain (dalam negara/ bendera yang sama).
+        # Bisa di-override .env (pisah koma), mis. VPN_CITIES_FRANCE="France - Paris,France - Strasbourg".
+        city_map = {
+            "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "").split(",") if c.strip()],
+            "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "").split(",") if c.strip()],
+        }
         country = search_map.get(region)
         matches = match_map.get(region, [])
+        cities = city_map.get(region, [])
         if not country:
             self.log_warn(f"Region '{region}' tidak dikenal, lewati switch VPN")
             return False
@@ -805,6 +813,26 @@ class EmulatorAutomator:
                     continue
             return False
 
+        def is_unable_to_connect():
+            for t in ["Unable to Connect", "Unable to connect", "Couldn't connect",
+                      "Could not connect", "Connection failed", "Tidak dapat terhubung"]:
+                try:
+                    if self.device(textContains=t).exists(timeout=0):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        def dismiss_error():
+            # Tutup layar 'Unable to Connect' -> Cancel (supaya bisa pilih city lain).
+            for t in ["Cancel", "Close", "OK", "Dismiss"]:
+                try:
+                    if self.device(text=t).click_exists(timeout=0):
+                        pause(1.0)
+                        return
+                except Exception:
+                    continue
+
         def dismiss_promo():
             # Tutup kartu promo 'ExpressKeys / Install Now' kalau ada (best-effort).
             for strat in [
@@ -831,7 +859,7 @@ class EmulatorAutomator:
                 return True
             pause(1)
 
-        select_retries = int(os.getenv("VPN_SELECT_RETRIES", "2"))
+        select_retries = int(os.getenv("VPN_SELECT_RETRIES", "3"))
         connect_wait = int(os.getenv("VPN_CONNECT_WAIT_SEC", "45"))
 
         def open_change():
@@ -939,16 +967,49 @@ class EmulatorAutomator:
                     continue
             return False
 
-        for attempt in range(1, select_retries + 2):
+        def click_location(idx):
+            # Pilih lokasi untuk percobaan ke-idx. Tiap percobaan pilih city BERBEDA dalam
+            # negara yang sama (biar kalau satu city 'Unable to Connect', city lain dicoba).
+            # 1) Kalau ada daftar city via .env -> pakai nama city persis (paling presisi).
+            if cities:
+                term = cities[idx % len(cities)]
+                try:
+                    if self.device(text=term, className="android.widget.TextView").click_exists(timeout=action_timeout(3)):
+                        self.log_info(f"Pilih lokasi VPN: '{term}'")
+                        return True
+                except Exception:
+                    pass
+            # 2) Dinamis: klik baris ke-idx yang mengandung nama negara (semua city bendera sama).
             try:
-                self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{select_retries + 1}")
+                rows = self.device(textContains=country, className="android.widget.TextView")
+                n = rows.count
+                if n > 0:
+                    i = idx % n
+                    label = ""
+                    try:
+                        label = rows[i].info.get("text", "")
+                    except Exception:
+                        pass
+                    rows[i].click()
+                    self.log_info(f"Pilih lokasi VPN baris #{i}/{n} '{label or country}'")
+                    return True
+            except Exception:
+                pass
+            # 3) Fallback: klik baris negara tepat.
+            return click_country_row()
+
+        total_attempts = select_retries + 1
+        for attempt in range(1, total_attempts + 1):
+            try:
+                self.log_info(f"VPN switch ke {region} ('{country}') — percobaan {attempt}/{total_attempts}")
                 open_change()
                 open_search()
                 pause(0.8)
                 type_country()
                 pause(1.8)
-                if not click_country_row():
-                    self.log_warn(f"Baris negara '{country}' tidak ke-klik (percobaan {attempt})")
+                # Tiap percobaan pilih city berbeda (idx = attempt-1).
+                if not click_location(attempt - 1):
+                    self.log_warn(f"Lokasi '{country}' tidak ke-klik (percobaan {attempt})")
                 pause(action_timeout(4))
 
                 # Konfirmasi pindah lokasi kalau muncul dialog.
@@ -959,14 +1020,29 @@ class EmulatorAutomator:
                     except Exception:
                         continue
 
-                # Tunggu sampai Protected.
+                # Tunggu sampai Protected ATAU muncul error 'Unable to Connect'.
                 deadline = time.time() + action_timeout(connect_wait)
                 protected = False
+                errored = False
                 while time.time() < deadline:
                     if is_protected():
                         protected = True
                         break
+                    if is_unable_to_connect():
+                        errored = True
+                        break
                     pause(1.5)
+
+                # Error 'Unable to Connect' -> tutup (Cancel) & coba CITY LAIN di percobaan berikutnya.
+                if errored:
+                    self.log_warn(f"'Unable to Connect' untuk {region} -> coba city lain (percobaan berikutnya)")
+                    dismiss_error()
+                    try:
+                        self.device.press("back")
+                        pause(1.2)
+                    except Exception:
+                        pass
+                    continue
 
                 # VERIFIKASI negara benar. Protected tapi negara salah -> retry (ini yang bikin "ngaco").
                 pause(1.0)

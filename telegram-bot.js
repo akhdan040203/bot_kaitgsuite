@@ -491,14 +491,34 @@ function adminRegionKeyboard(settings) {
     inline_keyboard: [row("UK", "🇬🇧 UK"), row("FRANCE", "🇫🇷 France"), [{ text: "⬅️ Tutup", callback_data: "back_menu" }]],
   };
 }
-function kaitDraftKeyboard(session) {
+function kaitDraftKeyboard(session, opts = {}) {
+  const credit = Math.max(0, Number(opts.credit || 0));
+  const accounts = Math.max(0, Number(opts.accounts || 0));
+  const rows = [
+    [{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }],
+  ];
+  if (accounts > 0 && credit >= accounts) {
+    // Credit cukup -> bayar penuh pakai credit (gratis).
+    rows.push([{ text: `💳 Bayar pakai Credit (${accounts} akun • GRATIS)`, callback_data: "confirm_kait" }]);
+  } else if (credit > 0) {
+    // Ada credit tapi kurang -> 2 pilihan: pakai credit + QRIS sisa, atau topup credit dulu.
+    const kurang = accounts - credit;
+    rows.push([{ text: `💳 ${credit} credit + QRIS ${kurang} akun`, callback_data: "confirm_kait" }]);
+    rows.push([{ text: `➕ Topup Credit (${kurang} akun)`, callback_data: "topup_credit" }]);
+  } else {
+    // Tidak ada credit -> QRIS saja.
+    rows.push([{ text: "🧾 Bayar QRIS", callback_data: "confirm_kait" }]);
+  }
+  rows.push([{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }]);
+  rows.push([{ text: "Batal", callback_data: "cancel_session" }]);
+  return { inline_keyboard: rows };
+}
+
+// Ambil credit user + jumlah akun draft -> dipakai utk nentuin tombol bayar di draft keyboard.
+function draftKeyboardOpts(user, parsed) {
   return {
-    inline_keyboard: [
-      [{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }],
-      [{ text: "Buat QRIS", callback_data: "confirm_kait" }],
-      [{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }],
-      [{ text: "Batal", callback_data: "cancel_session" }],
-    ],
+    credit: Number((user && user.credit) || 0),
+    accounts: parsed && parsed.valid ? parsed.valid.length : 0,
   };
 }
 
@@ -553,7 +573,7 @@ async function handleParsedKait(chatId, parsed, voucher) {
   const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion };
   sessions.set(String(chatId), draftSession);
   const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region), {
-    reply_markup: kaitDraftKeyboard(draftSession),
+    reply_markup: kaitDraftKeyboard(draftSession, draftKeyboardOpts(user, parsed)),
   });
   draftSession.draftMessageId = draftMessage.message_id;
   sessions.set(String(chatId), draftSession);
@@ -748,6 +768,117 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
 }
 
+// Topup Credit: beli credit sejumlah kekurangan (accounts - credit) via QRIS.
+// Setelah dibayar, credit user bertambah (lihat markOrderPaid -> cabang kind "topup").
+async function createCreditTopup(chatId, from, callbackMessageId) {
+  const session = sessions.get(String(chatId));
+  if (!session || session.mode !== "confirm_kait" || !session.parsed) {
+    await sendMessage(chatId, "Tidak ada draft order aktif.");
+    return;
+  }
+  const settings = await settingsStore.read();
+  const users = await usersStore.read();
+  const user = users[String(from.id)];
+  const accounts = session.parsed.valid.length;
+  const credit = Number((user && user.credit) || 0);
+  const kurang = accounts - credit;
+  if (kurang <= 0) {
+    await sendMessage(chatId, "Credit kamu sudah cukup. Pilih 'Bayar pakai Credit'.");
+    return;
+  }
+  const topupId = Date.now();
+  const pricePerAccount = getPricePerAccount(accounts, settings);
+  const subtotal = kurang * pricePerAccount;
+  const uniqueCode = getUniquePaymentCode(topupId, settings);
+  const totalPrice = subtotal + uniqueCode;
+
+  let invoice;
+  try {
+    invoice = await createQrisInvoice({ orderId: topupId, amount: totalPrice });
+  } catch (error) {
+    await sendMessage(chatId, `Gagal membuat QRIS topup: ${error.message}`);
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const topup = {
+    id: topupId,
+    kind: "topup",
+    telegramId: String(from.id),
+    username: from.username || "",
+    topupCredit: kurang,
+    pricePerAccount,
+    totalPrice,
+    uniqueCode,
+    status: "WAITING_PAYMENT",
+    payment: { ...invoice, orderId: topupId, amount: totalPrice, status: "PENDING" },
+    createdAt: now,
+    updatedAt: now,
+  };
+  await ordersStore.update((orders) => {
+    orders.push(topup);
+    return orders;
+  });
+  log(`created TOPUP #${topupId} user=@${topup.username || "-"} credit=${kurang} total=${totalPrice}`);
+
+  await notifyAdmins(
+    [
+      "🔔 <b>Topup Credit Baru</b>",
+      "",
+      `🆔 Topup: <code>${topupId}</code>`,
+      `👤 User: ${topup.username ? "@" + topup.username : topup.telegramId}`,
+      `🎁 Credit dibeli: <b>${kurang} akun</b>`,
+      `💰 Total bayar: <b>${formatRupiah(totalPrice)}</b>`,
+    ].join("\n"),
+    String(from.id)
+  );
+
+  const lines = [
+    `<b>QRIS Topup Credit #${topupId}</b>`,
+    "",
+    `🎁 Credit dibeli: <b>${kurang} akun</b>`,
+    `Harga: ${formatRupiah(pricePerAccount)} / akun`,
+    `Subtotal: ${formatRupiah(subtotal)}`,
+    uniqueCode ? `Kode unik: ${formatRupiah(uniqueCode)}` : "",
+    `Total bayar: <b>${formatRupiah(totalPrice)}</b>`,
+    "",
+    "Setelah dibayar, credit otomatis masuk. Lalu order lagi & pilih <b>Bayar pakai Credit</b>.",
+    "",
+    invoice.provider === "manual" ? invoice.qrText : "Scan QRIS untuk menyelesaikan pembayaran.",
+  ].filter(Boolean);
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: "Cek Pembayaran", callback_data: `checkpay_${topupId}` }],
+      [{ text: "Batalkan", callback_data: `cancel_order_${topupId}` }],
+    ],
+  };
+
+  const recordMsg = async (msgId) => {
+    await ordersStore.update((orders) =>
+      orders.map((item) => (item.id === topupId ? { ...item, paymentMessageId: msgId, paymentChatId: String(chatId) } : item))
+    );
+  };
+
+  sessions.delete(String(chatId));
+  if (invoice.provider !== "manual" && invoice.qrText) {
+    const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=700x700&data=${encodeURIComponent(invoice.qrText)}`;
+    try {
+      const sent = await sendPhoto(chatId, qrImageUrl, lines.join("\n"), { reply_markup: replyMarkup });
+      await recordMsg(sent.message_id);
+      await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
+      return;
+    } catch (error) {
+      const sent = await sendMessage(chatId, `${lines.join("\n")}\n\nQR image gagal, payload:\n<code>${invoice.qrText}</code>`, { reply_markup: replyMarkup });
+      await recordMsg(sent.message_id);
+      await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
+      return;
+    }
+  }
+  const sent = await sendMessage(chatId, lines.join("\n"), { reply_markup: replyMarkup });
+  await recordMsg(sent.message_id);
+  await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
+}
+
 async function retryFailedOrder(chatId, from, sourceOrderId, callbackMessageId) {
   const orders = await ordersStore.read();
   const src = orders.find((o) => String(o.id) === String(sourceOrderId));
@@ -875,6 +1006,43 @@ async function markOrderPaid(orderId) {
   const orders = await ordersStore.read();
   const order = orders.find((o) => String(o.id) === String(orderId));
   if (!order) return null;
+
+  // ===== TOPUP CREDIT =====: bukan order ngait. Saat dibayar -> tambah credit user, JANGAN QUEUE.
+  if (order.kind === "topup") {
+    if (order.status !== "WAITING_PAYMENT") {
+      log(`topup #${orderId} diabaikan (status=${order.status})`);
+      return null;
+    }
+    const num0 = Number(orderId);
+    const idValues0 = [...new Set([orderId, String(orderId), ...(Number.isFinite(num0) ? [num0] : [])])];
+    const okTopup = await ordersStore.patchItem(
+      "id",
+      idValues0,
+      { status: "TOPUP_DONE", "payment.status": "PAID", paidAt: new Date().toISOString() },
+      { whereField: "status", whereIn: ["WAITING_PAYMENT"] }
+    );
+    if (!okTopup) return null;
+    const addCredit = Number(order.topupCredit || 0);
+    if (addCredit > 0) {
+      await usersStore.update((users) => {
+        const u = users[order.telegramId];
+        if (u) u.credit = Number(u.credit || 0) + addCredit;
+        return users;
+      });
+    }
+    log(`topup #${orderId} PAID -> +${addCredit} credit user=${order.telegramId}`);
+    if (order.paymentChatId && order.paymentMessageId) {
+      try {
+        await tg("deleteMessage", { chat_id: order.paymentChatId, message_id: order.paymentMessageId });
+      } catch (_) {}
+    }
+    await sendMessage(
+      order.telegramId,
+      `🎁 <b>Topup berhasil!</b>\nCredit +${addCredit} akun sudah masuk.\nSilakan order lagi & pilih <b>Bayar pakai Credit</b>.`
+    ).catch(() => {});
+    return { ...order, status: "TOPUP_DONE", topupPaid: true };
+  }
+
   // PENTING: order yang DIBATALKAN ADMIN (/batalproses) tidak boleh dihidupkan lagi
   // oleh pembayaran yang masuk belakangan. Hanya WAITING_PAYMENT atau cancel non-admin
   // (mis. cancel user/timeout) yang boleh dibayar telat -> masuk antrian.
@@ -1659,13 +1827,14 @@ async function handleCallback(query) {
       message_id: session.draftMessageId || query.message?.message_id,
       text: buildOrderSummary(session.parsed, settings, user, voucher, session.region),
       parse_mode: "HTML",
-      reply_markup: kaitDraftKeyboard(session),
+      reply_markup: kaitDraftKeyboard(session, draftKeyboardOpts(user, session.parsed)),
     });
     await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region: ${regionLabel(session.region)}` }).catch(() => {});
     return;
   }
 
   if (data === "confirm_kait") return createOrderFromSession(chatId, from, query.message?.message_id);
+  if (data === "topup_credit") return createCreditTopup(chatId, from, query.message?.message_id);
   if (data === "apply_voucher") {
     const session = sessions.get(String(chatId));
     if (!session || !session.parsed) {
