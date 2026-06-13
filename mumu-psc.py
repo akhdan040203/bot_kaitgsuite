@@ -763,23 +763,27 @@ class EmulatorAutomator:
         search_map = {
             "UK": os.getenv("VPN_COUNTRY_UK", "United Kingdom"),
             "FRANCE": os.getenv("VPN_COUNTRY_FRANCE", "France"),
+            "GERMANY": os.getenv("VPN_COUNTRY_GERMANY", "Germany"),
         }
         # Penanda di kartu 'Selected Location' untuk cek lokasi sekarang sudah sesuai region.
         match_map = {
             "UK": [m.strip() for m in os.getenv("VPN_MATCH_UK", "UK -,UK-,United Kingdom").split(",") if m.strip()],
             "FRANCE": [m.strip() for m in os.getenv("VPN_MATCH_FRANCE", "France -,France-,France").split(",") if m.strip()],
+            "GERMANY": [m.strip() for m in os.getenv("VPN_MATCH_GERMANY", "Germany -,Germany-,Germany").split(",") if m.strip()],
         }
         # Daftar city pilihan per region (URUT prioritas). City pertama dicoba duluan.
-        # France: UTAMAKAN 'France - Alsace' (paling bagus/stabil). Bisa di-override via .env.
+        # France: UTAMAKAN 'France - Alsace'. Germany: utamakan Frankfurt. Bisa di-override via .env.
         city_map = {
             "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "").split(",") if c.strip()],
             "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "France - Alsace").split(",") if c.strip()],
+            "GERMANY": [c.strip() for c in os.getenv("VPN_CITIES_GERMANY", "Germany - Frankfurt - 1,Germany - Berlin,Germany - Nuremberg").split(",") if c.strip()],
         }
         # City yang DILARANG dipilih per region (kalau city utama gagal, jangan jatuh ke sini).
         # France: JANGAN pakai Paris.
         exclude_map = {
             "UK": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_UK", "").split(",") if x.strip()],
             "FRANCE": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_FRANCE", "Paris").split(",") if x.strip()],
+            "GERMANY": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_GERMANY", "").split(",") if x.strip()],
         }
         country = search_map.get(region)
         matches = match_map.get(region, [])
@@ -1407,11 +1411,17 @@ class EmulatorAutomator:
                     self.log_error(f"Failed to remove account {email} after finding existing DOKU")
                     return False
             
-            # Fast DOKU addition
-            if not self.click_candidates(texts=["Add PaysafeCard"], timeout=8):
-                self.log_error("Add PaysafeCard button not found")
-                self.fast_remove_google_account(email)
-                return False
+            # Fast DOKU addition. Posisi 'Add PaysafeCard' bisa beda per region (mis. Germany lebih
+            # bawah di list) -> kalau belum kelihatan, SCROLL dulu sampai ketemu, baru klik.
+            if not self.click_candidates(texts=["Add PaysafeCard"], timeout=4):
+                try:
+                    self.device(scrollable=True).scroll.to(text="Add PaysafeCard")
+                except Exception:
+                    pass
+                if not self.click_candidates(texts=["Add PaysafeCard"], timeout=6):
+                    self.log_error("Add PaysafeCard button not found (sudah scroll)")
+                    self.fast_remove_google_account(email)
+                    return False
                 
             self.log_info("Add PaysafeCard button found and clicked")
             self.emit_progress(email, 60, "klik add paysafecard")

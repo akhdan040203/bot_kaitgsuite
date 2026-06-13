@@ -230,8 +230,7 @@ function regionMenuKeyboard(currentRegion, settings) {
   const cur = String(currentRegion || "UK").toUpperCase();
   const enabled = enabledRegions(settings);
   const mark = (r) => (cur === r ? " ✅" : "");
-  const labelMap = { UK: "🇬🇧 UK", FRANCE: "🇫🇷 France" };
-  const rows = enabled.map((r) => [{ text: `${labelMap[r] || r}${mark(r)}`, callback_data: `region_set_${r}` }]);
+  const rows = enabled.map((r) => [{ text: `${REGION_LABELS[r] || r}${mark(r)}`, callback_data: `region_set_${r}` }]);
   rows.push([{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }]);
   return { inline_keyboard: rows };
 }
@@ -455,11 +454,12 @@ async function downloadTelegramFile(fileId) {
   return data;
 }
 
-const REGION_OPTIONS = ["UK", "FRANCE"];
+// Tambah region baru cukup di sini (key UPPERCASE + label berbendera).
+const REGION_LABELS = { UK: "🇬🇧 UK", FRANCE: "🇫🇷 France", GERMANY: "🇩🇪 Germany" };
+const REGION_OPTIONS = Object.keys(REGION_LABELS);
 function regionLabel(region) {
   const r = String(region || "UK").toUpperCase();
-  if (r === "FRANCE") return "🇫🇷 France";
-  return "🇬🇧 UK";
+  return REGION_LABELS[r] || REGION_LABELS.UK;
 }
 function disabledRegionsOf(settings) {
   const d = settings && Array.isArray(settings.disabledRegions) ? settings.disabledRegions : [];
@@ -483,13 +483,12 @@ function nextRegion(region, settings) {
 }
 function adminRegionKeyboard(settings) {
   const disabled = disabledRegionsOf(settings);
-  const row = (r, label) => [{
-    text: `${label} — ${disabled.includes(r) ? "🚫 OFF" : "✅ ON"}`,
+  const rows = REGION_OPTIONS.map((r) => [{
+    text: `${REGION_LABELS[r] || r} — ${disabled.includes(r) ? "🚫 OFF" : "✅ ON"}`,
     callback_data: `admin_region_toggle_${r}`,
-  }];
-  return {
-    inline_keyboard: [row("UK", "🇬🇧 UK"), row("FRANCE", "🇫🇷 France"), [{ text: "⬅️ Tutup", callback_data: "back_menu" }]],
-  };
+  }]);
+  rows.push([{ text: "⬅️ Tutup", callback_data: "back_menu" }]);
+  return { inline_keyboard: rows };
 }
 function kaitDraftKeyboard(session, opts = {}) {
   const credit = Math.max(0, Number(opts.credit || 0));
@@ -1698,9 +1697,13 @@ async function handleCallback(query) {
     return;
   }
 
-  if (data === "region_set_UK" || data === "region_set_FRANCE") {
+  if (data.startsWith("region_set_")) {
     const settings = await settingsStore.read();
-    const requested = data === "region_set_FRANCE" ? "FRANCE" : "UK";
+    const requested = data.replace("region_set_", "").toUpperCase();
+    if (!REGION_OPTIONS.includes(requested)) {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Region tidak dikenal." }).catch(() => {});
+      return;
+    }
     if (!enabledRegions(settings).includes(requested)) {
       await tg("answerCallbackQuery", { callback_query_id: query.id, text: `Region ${regionLabel(requested)} sedang dinonaktifkan admin.` }).catch(() => {});
       return;
@@ -1752,12 +1755,16 @@ async function handleCallback(query) {
     return;
   }
 
-  if (data === "admin_region_toggle_UK" || data === "admin_region_toggle_FRANCE") {
+  if (data.startsWith("admin_region_toggle_")) {
     if (!isAdmin(chatId)) {
       await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Khusus admin." }).catch(() => {});
       return;
     }
-    const region = data === "admin_region_toggle_FRANCE" ? "FRANCE" : "UK";
+    const region = data.replace("admin_region_toggle_", "").toUpperCase();
+    if (!REGION_OPTIONS.includes(region)) {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Region tidak dikenal." }).catch(() => {});
+      return;
+    }
     const newSettings = await settingsStore.update((s) => {
       const disabled = disabledRegionsOf(s);
       let next;
