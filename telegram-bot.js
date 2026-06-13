@@ -455,7 +455,7 @@ async function downloadTelegramFile(fileId) {
 }
 
 // Tambah region baru cukup di sini (key UPPERCASE + label berbendera).
-const REGION_LABELS = { UK: "🇬🇧 UK", FRANCE: "🇫🇷 France", GERMANY: "🇩🇪 Germany" };
+const REGION_LABELS = { UK: "🇬🇧 UK", FRANCE: "🇫🇷 France", GERMANY: "🇩🇪 Germany", SPAIN: "🇪🇸 Spain", NETHERLANDS: "🇳🇱 Netherlands" };
 const REGION_OPTIONS = Object.keys(REGION_LABELS);
 function regionLabel(region) {
   const r = String(region || "UK").toUpperCase();

@@ -764,19 +764,25 @@ class EmulatorAutomator:
             "UK": os.getenv("VPN_COUNTRY_UK", "United Kingdom"),
             "FRANCE": os.getenv("VPN_COUNTRY_FRANCE", "France"),
             "GERMANY": os.getenv("VPN_COUNTRY_GERMANY", "Germany"),
+            "SPAIN": os.getenv("VPN_COUNTRY_SPAIN", "Spain"),
+            "NETHERLANDS": os.getenv("VPN_COUNTRY_NETHERLANDS", "Netherlands"),
         }
         # Penanda di kartu 'Selected Location' untuk cek lokasi sekarang sudah sesuai region.
         match_map = {
             "UK": [m.strip() for m in os.getenv("VPN_MATCH_UK", "UK -,UK-,United Kingdom").split(",") if m.strip()],
             "FRANCE": [m.strip() for m in os.getenv("VPN_MATCH_FRANCE", "France -,France-,France").split(",") if m.strip()],
             "GERMANY": [m.strip() for m in os.getenv("VPN_MATCH_GERMANY", "Germany -,Germany-,Germany").split(",") if m.strip()],
+            "SPAIN": [m.strip() for m in os.getenv("VPN_MATCH_SPAIN", "Spain -,Spain-,Spain").split(",") if m.strip()],
+            "NETHERLANDS": [m.strip() for m in os.getenv("VPN_MATCH_NETHERLANDS", "Netherlands -,Netherlands-,Netherlands").split(",") if m.strip()],
         }
         # Daftar city pilihan per region (URUT prioritas). City pertama dicoba duluan.
-        # France: UTAMAKAN 'France - Alsace'. Germany: utamakan Frankfurt. Bisa di-override via .env.
+        # France: UTAMAKAN 'France - Alsace'. Germany: utamakan Nuremberg. Spain: utamakan Barcelona.
         city_map = {
             "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "").split(",") if c.strip()],
             "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "France - Alsace").split(",") if c.strip()],
-            "GERMANY": [c.strip() for c in os.getenv("VPN_CITIES_GERMANY", "Germany - Frankfurt - 1,Germany - Berlin,Germany - Nuremberg").split(",") if c.strip()],
+            "GERMANY": [c.strip() for c in os.getenv("VPN_CITIES_GERMANY", "Germany - Nuremberg,Germany - Frankfurt - 1,Germany - Berlin").split(",") if c.strip()],
+            "SPAIN": [c.strip() for c in os.getenv("VPN_CITIES_SPAIN", "Spain - Barcelona,Spain - Barcelona - 2,Spain - Madrid,Spain - Valencia").split(",") if c.strip()],
+            "NETHERLANDS": [c.strip() for c in os.getenv("VPN_CITIES_NETHERLANDS", "Netherlands - Rotterdam,Netherlands - Amsterdam,Netherlands - The Hague").split(",") if c.strip()],
         }
         # City yang DILARANG dipilih per region (kalau city utama gagal, jangan jatuh ke sini).
         # France: JANGAN pakai Paris.
@@ -784,6 +790,8 @@ class EmulatorAutomator:
             "UK": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_UK", "").split(",") if x.strip()],
             "FRANCE": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_FRANCE", "Paris").split(",") if x.strip()],
             "GERMANY": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_GERMANY", "").split(",") if x.strip()],
+            "SPAIN": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_SPAIN", "").split(",") if x.strip()],
+            "NETHERLANDS": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_NETHERLANDS", "").split(",") if x.strip()],
         }
         country = search_map.get(region)
         matches = match_map.get(region, [])
