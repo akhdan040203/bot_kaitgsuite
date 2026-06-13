@@ -1467,6 +1467,8 @@ class EmulatorAutomator:
                 self.device(text="Full name").click()
                 pause(0.5)
                 self.set_text_fast("indonesian", timeout=3, text="Full name")
+                # Sebagian negara butuh pilih Province (mis. Spain -> Asturias). Pilih sesuai region.
+                self.fill_signup_province()
                 self.fast_click_text(["Save", "SAVE", "Simpan", "SIMPAN"])
                 pause(3)
 
@@ -1511,6 +1513,96 @@ class EmulatorAutomator:
             self.log_error(f"Error processing account {email}: {e}")
             self.fast_remove_google_account(email)
             return False
+
+    def fill_signup_province(self):
+        """Pilih 'Province' di form Complete sign up untuk region yang butuh (mis. Spain -> Asturias).
+        Region diambil dari env REGION. Provinsi per region bisa di-override via .env."""
+        region = os.getenv("REGION", "UK").upper()
+        province_map = {
+            "SPAIN": os.getenv("VPN_PROVINCE_SPAIN", "Asturias"),
+            # tambah negara lain di sini kalau perlu, mis: "ITALY": os.getenv("VPN_PROVINCE_ITALY", "...")
+        }
+        province = province_map.get(region)
+        if not province:
+            return  # region ini tidak butuh province
+        # Ada field Province/Provincia? Kalau tidak ada, lewati.
+        has_field = False
+        for lbl in ["Province", "Provincia", "Region", "State"]:
+            try:
+                if self.device(textContains=lbl).exists(timeout=action_timeout(2)):
+                    has_field = True
+                    break
+            except Exception:
+                continue
+        if not has_field:
+            return
+        self.log_info(f"Complete sign up: pilih Province '{province}' (region {region})")
+        # Buka dropdown Province.
+        for opener in [
+            lambda: self.device(text="Province").click_exists(timeout=action_timeout(2)),
+            lambda: self.device(textContains="Province").click_exists(timeout=action_timeout(2)),
+            lambda: self.device(textContains="Provincia").click_exists(timeout=action_timeout(2)),
+            lambda: self.device(className="android.widget.Spinner").click_exists(timeout=action_timeout(2)),
+        ]:
+            try:
+                if opener():
+                    pause(1.0)
+                    break
+            except Exception:
+                continue
+        # Pilih provinsi target (scroll kalau belum kelihatan).
+        selected = False
+        try:
+            if self.device(text=province).click_exists(timeout=action_timeout(2)):
+                selected = True
+            else:
+                try:
+                    self.device(scrollable=True).scroll.to(text=province)
+                except Exception:
+                    pass
+                if self.device(text=province).click_exists(timeout=action_timeout(2)):
+                    selected = True
+        except Exception as e:
+            self.log_warn(f"error pilih Province '{province}': {e}")
+
+        # FALLBACK: kalau target tidak bisa dipilih / tidak ada -> pilih APA SAJA yang ada di
+        # dropdown biar form valid & proses lanjut (jangan nyangkut karena field wajib).
+        if not selected:
+            self.log_warn(f"Province '{province}' tidak bisa dipilih -> pilih opsi apa saja yang ada")
+            # 1) Item dropdown standar (Spinner) = CheckedTextView; klik item pertama yang ada teksnya.
+            for cls in ["android.widget.CheckedTextView"]:
+                try:
+                    items = self.device(className=cls)
+                    for i in range(items.count):
+                        try:
+                            t = (items[i].info.get("text") or "").strip()
+                        except Exception:
+                            t = ""
+                        if t:
+                            items[i].click()
+                            self.log_info(f"Province fallback: pilih '{t}'")
+                            selected = True
+                            break
+                except Exception:
+                    pass
+                if selected:
+                    break
+            # 2) Kalau masih belum, klik salah satu provinsi umum yang kelihatan.
+            if not selected:
+                for prov in ["Álava", "Albacete", "Alicante", "Almería", "Asturias",
+                             "Ávila", "Badajoz", "Barcelona", "Madrid", "Valencia"]:
+                    try:
+                        if self.device(text=prov).click_exists(timeout=0):
+                            self.log_info(f"Province fallback: pilih '{prov}'")
+                            selected = True
+                            break
+                    except Exception:
+                        continue
+            if not selected:
+                self.log_warn("Province fallback gagal: tidak ada opsi yang bisa dipilih")
+        else:
+            self.log_info(f"Province '{province}' dipilih")
+        pause(0.8)
 
     def save_successful_account_safe(self, email, password):
         """Thread-safe method to save successful account with duplicate prevention"""
