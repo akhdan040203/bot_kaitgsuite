@@ -401,6 +401,15 @@ async function showHome(chatId, from) {
   const user = await upsertUser(from);
   const settings = await settingsStore.read();
   const username = user.username ? `@${user.username}` : "-";
+
+  // Bot Info: total ngait global + milestone bonus (tiap {step} ngait -> +{per} credit).
+  const stats = await botStats();
+  const milestoneStep = Number(process.env.BONUS_MILESTONE_STEP || 1000);
+  const milestonePer = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
+  const userKait = Number(user.totalKait || 0);
+  const nextMilestone = (Math.floor(userKait / milestoneStep) + 1) * milestoneStep;
+  const toNext = Math.max(0, nextMilestone - userKait);
+
   const homeText = [
     `Halo ${user.firstName || "User"}`,
     "",
@@ -410,6 +419,11 @@ async function showHome(chatId, from) {
     `L Total Kait: ${user.totalKait || 0}`,
     `L Credit Ngait: ${user.credit || 0} akun`,
     `L Total Pengeluaran: ${formatRupiah(user.totalSpend || 0)}`,
+    "",
+    "<b>Bot Info</b>",
+    `L Total Ngait (semua user): ${stats.totalKait}`,
+    `L Milestone: tiap ${milestoneStep} ngait → +${milestonePer} credit`,
+    `L Progress kamu: ${userKait}/${nextMilestone} (kurang ${toNext} ngait lagi → +${milestonePer} credit)`,
     "",
     "<b>Configuration</b>",
     "L Payment: QRIS",
@@ -931,7 +945,11 @@ async function handleConvert(chatId, text) {
   if (parsed.valid.length) await sendDocument(chatId, outPath, "converted-gsuite.txt");
 }
 
-async function showQueue(chatId, telegramId) {
+// Pesan antrian yang sedang "live" -> di-edit otomatis berkala (tanpa perlu Refresh).
+// key `${chatId}:${messageId}` -> { chatId, messageId, telegramId, until, lastText }
+const liveQueueMessages = new Map();
+
+async function buildQueueView(telegramId) {
   const allOrders = await ordersStore.read();
   const activeOrders = allOrders.filter((order) => ["RUNNING", "QUEUED"].includes(order.status));
   const totalQueueAccounts = activeOrders.reduce(
@@ -951,54 +969,104 @@ async function showQueue(chatId, telegramId) {
 
   const peopleInQueue = new Set(activeOrders.map((order) => String(order.telegramId))).size;
 
-  await sendMessage(
-    chatId,
-    [
-      "📋 <b>Antrian Ngait</b>",
-      "",
-      `👥 Orang di antrian: <b>${peopleInQueue}</b>`,
-      `📦 Order aktif: <b>${totalQueueOrders}</b>`,
-      `📧 Total gsuite ngait: <b>${totalQueueAccounts}</b>`,
-      "",
-      "📊 <b>Progress Total (semua order)</b>",
-      `<code>${miniBar(totalDone, totalAllAccounts || 1)}</code>`,
-      `${totalDone}/${totalAllAccounts} akun selesai`,
-      "",
-      "📜 <b>Antrian Kamu</b>",
-      orders.length
-        ? orders
-            .map((order, index) => {
-              const statusIcon = order.status === "RUNNING" ? "🟢" : "🕒";
-              const head = `${index + 1}. ${statusIcon} <b>${order.status}</b> — ${order.totalAccounts} akun  🆔 <code>${order.id}</code>`;
-              const batches = Array.isArray(order.batches) ? order.batches : [];
-              if (!batches.length) {
-                return `${head}\n   🕒 Menunggu diproses...`;
-              }
-              const batchLines = batches.map((b) => {
-                const total = Number(b.total || 0);
-                const success = Number(b.success || 0);
-                const done = b.status === "DONE";
-                const pct = done ? 100 : Math.floor((success / Math.max(1, total)) * 100);
-                const label = b.round === 1 ? `Batch ${b.round}` : `Batch ${b.round} (sisa ${total} gsuite)`;
-                return [
-                  `   📦 ${label} — ✅ ${success}/${total} berhasil`,
-                  `   <code>${miniBar(pct, 100)}</code>`,
-                ].join("\n");
-              });
-              return [head, ...batchLines].join("\n");
-            })
-            .join("\n\n")
-        : "Belum ada order paid/proses.",
-    ].join("\n"),
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🔄 Refresh", callback_data: "refresh_queue" }],
-          [{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }],
-        ],
-      },
+  const text = [
+    "📋 <b>Antrian Ngait</b>",
+    "",
+    `👥 Orang di antrian: <b>${peopleInQueue}</b>`,
+    `📦 Order aktif: <b>${totalQueueOrders}</b>`,
+    `📧 Total gsuite ngait: <b>${totalQueueAccounts}</b>`,
+    "",
+    "📊 <b>Progress Total (semua order)</b>",
+    `<code>${miniBar(totalDone, totalAllAccounts || 1)}</code>`,
+    `${totalDone}/${totalAllAccounts} akun selesai`,
+    "",
+    "📜 <b>Antrian Kamu</b>",
+    orders.length
+      ? orders
+          .map((order, index) => {
+            const statusIcon = order.status === "RUNNING" ? "🟢" : "🕒";
+            const head = `${index + 1}. ${statusIcon} <b>${order.status}</b> — ${order.totalAccounts} akun  🆔 <code>${order.id}</code>`;
+            const batches = Array.isArray(order.batches) ? order.batches : [];
+            if (!batches.length) {
+              return `${head}\n   🕒 Menunggu diproses...`;
+            }
+            const batchLines = batches.map((b) => {
+              const total = Number(b.total || 0);
+              const success = Number(b.success || 0);
+              const done = b.status === "DONE";
+              const pct = done ? 100 : Math.floor((success / Math.max(1, total)) * 100);
+              const label = b.round === 1 ? `Batch ${b.round}` : `Batch ${b.round} (sisa ${total} gsuite)`;
+              return [
+                `   📦 ${label} — ✅ ${success}/${total} berhasil`,
+                `   <code>${miniBar(pct, 100)}</code>`,
+              ].join("\n");
+            });
+            return [head, ...batchLines].join("\n");
+          })
+          .join("\n\n")
+      : "Belum ada order paid/proses.",
+  ].join("\n");
+
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: "🔄 Refresh", callback_data: "refresh_queue" }],
+      [{ text: "⬅️ Kembali ke Menu", callback_data: "back_menu" }],
+    ],
+  };
+  return { text, reply_markup };
+}
+
+async function showQueue(chatId, telegramId) {
+  const view = await buildQueueView(telegramId);
+  const sent = await sendMessage(chatId, view.text, { reply_markup: view.reply_markup });
+  // Daftarkan pesan ini supaya di-update OTOMATIS (tanpa Refresh) selama beberapa menit.
+  if (sent && sent.message_id) {
+    const durationMs = Number(process.env.QUEUE_AUTOREFRESH_MINUTES || 5) * 60 * 1000;
+    liveQueueMessages.set(`${chatId}:${sent.message_id}`, {
+      chatId,
+      messageId: sent.message_id,
+      telegramId: String(telegramId),
+      until: Date.now() + durationMs,
+      lastText: view.text,
+    });
+  }
+}
+
+// Ticker: edit semua pesan antrian "live" dengan data terbaru. Skip kalau konten sama
+// (hindari error 'message is not modified' & hemat rate-limit). Auto-stop saat expired/dihapus.
+let isTickingQueues = false;
+async function tickLiveQueues() {
+  if (isTickingQueues || liveQueueMessages.size === 0) return;
+  isTickingQueues = true;
+  try {
+    const now = Date.now();
+    for (const [key, q] of liveQueueMessages) {
+      if (now > q.until) {
+        liveQueueMessages.delete(key);
+        continue;
+      }
+      try {
+        const view = await buildQueueView(q.telegramId);
+        if (view.text === q.lastText) continue; // tidak berubah -> jangan edit
+        await tg("editMessageText", {
+          chat_id: q.chatId,
+          message_id: q.messageId,
+          text: view.text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_markup: view.reply_markup,
+        });
+        q.lastText = view.text;
+      } catch (error) {
+        const m = String(error.message || "");
+        if (m.includes("not modified")) continue;
+        // pesan dihapus / tidak ketemu / diedit -> berhenti melacak.
+        liveQueueMessages.delete(key);
+      }
     }
-  );
+  } finally {
+    isTickingQueues = false;
+  }
 }
 
 async function markOrderPaid(orderId) {
@@ -1153,13 +1221,22 @@ async function autoCheckPayments() {
   if (isCheckingPayments) return;
   isCheckingPayments = true;
   try {
+    const now = Date.now();
+    const expireMs = Number(process.env.PAYMENT_EXPIRE_MINUTES || 15) * 60 * 1000;
+    const isExpired = (order) => {
+      const created = new Date(order.createdAt || 0).getTime();
+      return Number.isFinite(created) && now - created >= expireMs;
+    };
+
+    // 1) Poll order aktif utk deteksi pembayaran. JANGAN poll WAITING_PAYMENT yang sudah
+    //    kadaluarsa (akan di-expire di langkah 2) -> ini yang bikin spam timeout OrderKuota.
     const orders = (await ordersStore.read())
       .filter((order) => {
-        if (order.status === "WAITING_PAYMENT") return true;
+        if (order.status === "WAITING_PAYMENT") return !isExpired(order);
         if (order.status !== "CANCELLED") return false;
-        if (order.cancelledByAdmin) return false; // dibatalkan admin -> FINAL, jangan poll/hidupkan
+        if (order.cancelledByAdmin || order.autoExpired) return false; // FINAL -> jangan poll
         if (!order.cancelledAt) return false;
-        const cancelledAgeMs = Date.now() - new Date(order.cancelledAt).getTime();
+        const cancelledAgeMs = now - new Date(order.cancelledAt).getTime();
         return Number.isFinite(cancelledAgeMs) && cancelledAgeMs < 10 * 60 * 1000;
       })
       .slice(0, 10);
@@ -1175,6 +1252,40 @@ async function autoCheckPayments() {
         }
       } catch (error) {
         console.error(`[payment] order #${order.id}: ${error.message}`);
+      }
+    }
+
+    // 2) Auto-expire: order WAITING_PAYMENT yang sudah lewat batas & belum dibayar -> CANCELLED.
+    //    Ini menghentikan polling (no more timeout spam) & membuat order "hilang" otomatis.
+    const expireList = (await ordersStore.read()).filter(
+      (o) => o.status === "WAITING_PAYMENT" && isExpired(o)
+    );
+    for (const order of expireList) {
+      const num = Number(order.id);
+      const idValues = [...new Set([order.id, String(order.id), ...(Number.isFinite(num) ? [num] : [])])];
+      const ok = await ordersStore.patchItem(
+        "id",
+        idValues,
+        { status: "CANCELLED", autoExpired: true, cancelledAt: new Date().toISOString() },
+        { whereField: "status", whereIn: ["WAITING_PAYMENT"] }
+      );
+      if (!ok) continue;
+      const mins = Math.round(expireMs / 60000);
+      log(`order #${order.id} auto-expired (tidak dibayar > ${mins} menit) -> CANCELLED`);
+      if (order.paymentChatId && order.paymentMessageId) {
+        try {
+          await tg("deleteMessage", { chat_id: order.paymentChatId, message_id: order.paymentMessageId });
+        } catch (_) {}
+      }
+      // Notif user hanya kalau ordernya masih "baru-baru" (hindari spam ke order yang sudah lama banget).
+      const created = new Date(order.createdAt || 0).getTime();
+      if (Number.isFinite(created) && now - created < 2 * 60 * 60 * 1000) {
+        try {
+          await sendMessage(
+            order.telegramId,
+            `⏱️ Order #${order.id} dibatalkan otomatis karena tidak dibayar dalam ${mins} menit. Silakan buat order baru jika masih mau lanjut.`
+          );
+        } catch (_) {}
       }
     }
   } finally {
@@ -1922,6 +2033,7 @@ async function main() {
 
   console.log("Telegram bot started.");
   setInterval(autoCheckPayments, Number(process.env.PAYMENT_CHECK_INTERVAL_MS || 15000));
+  setInterval(tickLiveQueues, Number(process.env.QUEUE_AUTOREFRESH_MS || 5000));
   poll();
 }
 
