@@ -1319,6 +1319,7 @@ async function handleAdminCommand(chatId, text) {
         "/orders",
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
+        "/buyer ORDER_ID @username  (arahkan progres+hasil order ke buyer)",
         "/progres ORDER_ID PERSEN  (update bar progres ke customer)",
         "/kirimhasil ORDER_ID  (kirim file .txt + caption -> hasil ke customer)",
         "/users  (daftar user + ID + saldo)",
@@ -1657,6 +1658,36 @@ async function handleAdminCommand(chatId, text) {
     return true;
   }
 
+  if (command === "/buyer") {
+    const orderId = String(args[0] || "").replace(/^#+/, "").trim();
+    const target = String(args[1] || "").trim();
+    if (!orderId || !target) {
+      await sendMessage(chatId, "Format: /buyer ORDER_ID ID_atau_@username\nContoh: /buyer 1781527204962 @namabuyer");
+      return true;
+    }
+    const orders = await ordersStore.read();
+    const order = orders.find((o) => String(o.id) === String(orderId));
+    if (!order) {
+      await sendMessage(chatId, `Order #${orderId} tidak ditemukan.`);
+      return true;
+    }
+    let buyerId = target.replace(/^@/, "");
+    if (!/^\d+$/.test(buyerId)) {
+      const users = await usersStore.read();
+      const match = Object.values(users).find((u) => String(u.username || "").toLowerCase() === buyerId.toLowerCase());
+      if (!match) {
+        await sendMessage(chatId, `User @${buyerId} tidak ditemukan (buyer harus pernah /start ke bot dulu).`);
+        return true;
+      }
+      buyerId = String(match.telegramId);
+    }
+    const num = Number(orderId);
+    const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+    await ordersStore.patchItem("id", idValues, { notifyTo: buyerId });
+    await sendMessage(chatId, `✅ Order #${orderId}: progres & hasil (real-time dari worker) akan dikirim ke BUYER <code>${buyerId}</code>.`);
+    return true;
+  }
+
   if (command === "/progres" || command === "/progress") {
     const orderId = String(args[0] || "").replace(/^#+/, "").trim();
     const percent = Math.max(0, Math.min(100, Number(args[1])));
@@ -1672,7 +1703,7 @@ async function handleAdminCommand(chatId, text) {
     }
     const total = Math.max(1, Number(order.totalAccounts || 0));
     const done = Math.round((total * percent) / 100);
-    const customerId = order.telegramId;
+    const customerId = order.notifyTo || order.telegramId;
     const text = renderCustomerProgress(orderId, order.region, done, total);
     // Edit pesan progres yang SAMA kalau sudah ada (biar bar update di tempat), else kirim baru.
     let msgId = order.adminProgressMessageId || null;
@@ -1689,7 +1720,7 @@ async function handleAdminCommand(chatId, text) {
     }
     const num = Number(orderId);
     const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
-    await ordersStore.patchItem("id", idValues, { adminProgressMessageId: msgId, adminProgressChatId: String(customerId) });
+    await ordersStore.patchItem("id", idValues, { adminProgressMessageId: msgId, adminProgressChatId: String(customerId), adminProgressDone: done });
     await sendMessage(chatId, `📊 Progres order #${orderId} → ${percent}% (${done}/${total}) terkirim ke customer.`);
     return true;
   }
@@ -1747,26 +1778,31 @@ async function sendOrderResultToCustomer(adminChatId, message) {
     count = content.split(/\r?\n/).filter((l) => l.trim()).length;
   } catch (_) {}
 
-  const customerId = order.telegramId;
+  const customerId = order.notifyTo || order.telegramId;
   const total = Math.max(1, Number(order.totalAccounts || count));
 
-  // 0) Animasi bar progres ke customer (mirip ngait normal). Kalau sudah ada pesan progres
-  //    dari /progres, lanjutkan/edit pesan itu (jangan bikin baru).
+  // 0) Animasi bar progres ke customer. LANJUT dari posisi terakhir (dari /progres) -> jalan
+  //    real-time naik sampai selesai, TIDAK mundur ke 0. Pakai pesan bar yang sama kalau ada.
   try {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const frames = [0, Math.round(count * 0.34), Math.round(count * 0.67), count];
+    const startDone = Math.min(count, Math.max(0, Number(order.adminProgressDone || 0)));
+    const stepsN = 4;
+    const frames = [];
+    for (let i = 1; i <= stepsN; i++) {
+      frames.push(Math.round(startDone + ((count - startDone) * i) / stepsN));
+    }
     let progMsgId = order.adminProgressMessageId || null;
     if (!progMsgId) {
-      const prog = await sendMessage(customerId, renderCustomerProgress(orderId, order.region, frames[0], total));
+      const prog = await sendMessage(customerId, renderCustomerProgress(orderId, order.region, startDone, total));
       progMsgId = prog && prog.message_id;
     }
-    for (let i = 1; i < frames.length; i++) {
+    for (const f of frames) {
       await sleep(900);
       if (progMsgId) {
         await tg("editMessageText", {
           chat_id: customerId,
           message_id: progMsgId,
-          text: renderCustomerProgress(orderId, order.region, frames[i], total),
+          text: renderCustomerProgress(orderId, order.region, f, total),
           parse_mode: "HTML",
           disable_web_page_preview: true,
         }).catch(() => {});

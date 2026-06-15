@@ -303,8 +303,12 @@ async function processOrder(order) {
     return;
   }
   log(`order #${order.id} status RUNNING`);
+  // Semua notif/bar/file ke BUYER dikirim ke notifyId. Kalau order dibuat admin untuk buyer
+  // (order.notifyTo di-set via /buyer), progres real-time worker dikirim ke BUYER, bukan admin.
+  // (Kredit/totalKait tetap ke order.telegramId = pembayar.)
+  const notifyId = order.notifyTo || order.telegramId;
   const initialProgress = await notify(
-    order.telegramId,
+    notifyId,
     renderProgress(order, "Menunggu worker", 0, order.totalAccounts, "Order mulai diproses.")
   );
   const progressMessageId = initialProgress?.message_id;
@@ -315,7 +319,7 @@ async function processOrder(order) {
   const startCount = countLines(startInputFile);
   const isResume = startCount > 0 && startCount < Number(order.totalAccounts || 0);
   for (const adminId of ADMIN_IDS) {
-    if (String(adminId) === String(order.telegramId)) continue;
+    if (String(adminId) === String(notifyId)) continue;
     await sendDocument(
       adminId,
       startInputFile,
@@ -376,7 +380,7 @@ async function processOrder(order) {
       await updateOrder(order.id, { successCount: successEmails.size, progressPercent: overallPercent, batches });
       const doneEquivalent = (overallPercent / 100) * totalAccounts;
       await editNotify(
-        order.telegramId,
+        notifyId,
         progressMessageId,
         renderProgress(order, "Ngait akun", doneEquivalent, totalAccounts, `${overallPercent}% - ${label || "proses"}`)
       );
@@ -405,7 +409,7 @@ async function processOrder(order) {
         `order #${order.id} retry round ${round}/${maxRetryRounds}: linking ${accountsToLink.length} account(s), success=${successBeforeRound}/${totalAccounts}`
       );
       await editNotify(
-        order.telegramId,
+        notifyId,
         progressMessageId,
         renderProgress(
           order,
@@ -448,7 +452,7 @@ async function processOrder(order) {
 
       log(`order #${order.id} round ${round} result success=${successAfterRound}/${totalAccounts} sisa=${unverifiedCount}`);
       await editNotify(
-        order.telegramId,
+        notifyId,
         progressMessageId,
         renderProgress(
           order,
@@ -497,19 +501,19 @@ async function processOrder(order) {
       });
 
       await editNotify(
-        order.telegramId,
+        notifyId,
         progressMessageId,
         `❌ <b>Order #${order.id} dibatalkan admin.</b>\nBerhasil: ${successCancel}/${totalAccounts} • Gagal/belum: ${failedCancel}`
       );
       // Kirim file hasil ke user: success + gagal.
       if (successCancel > 0) {
-        await sendDocument(order.telegramId, resultFile, `✅ Berhasil order #${order.id} — ${successCancel} akun (dibatalkan admin)`);
+        await sendDocument(notifyId, resultFile, `✅ Berhasil order #${order.id} — ${successCancel} akun (dibatalkan admin)`);
       }
       if (failedCancel > 0) {
-        await sendDocument(order.telegramId, gagalFile, `❌ Gagal/belum berhasil order #${order.id} — ${failedCancel} akun (dibatalkan admin)`);
+        await sendDocument(notifyId, gagalFile, `❌ Gagal/belum berhasil order #${order.id} — ${failedCancel} akun (dibatalkan admin)`);
       }
       await notify(
-        order.telegramId,
+        notifyId,
         [
           `Order #${order.id} dibatalkan admin.`,
           "",
@@ -524,13 +528,13 @@ async function processOrder(order) {
       );
       // Admin: notif + file success & gagal.
       for (const adminId of ADMIN_IDS) {
-        if (String(adminId) === String(order.telegramId)) continue;
+        if (String(adminId) === String(notifyId)) continue;
         await notify(adminId, `[ADMIN] Order #${order.id} dibatalkan. Berhasil: ${successCancel}/${totalAccounts} • Gagal: ${failedCancel}`);
         if (successCancel > 0) await sendDocument(adminId, resultFile, `[ADMIN] success #${order.id} (dibatalkan)`).catch(() => {});
         if (failedCancel > 0) await sendDocument(adminId, gagalFile, `[ADMIN] gagal #${order.id} (dibatalkan)`).catch(() => {});
       }
-      await deleteNotify(order.telegramId, progressMessageId);
-      if (order.queueMessageId) await deleteNotify(order.telegramId, order.queueMessageId);
+      await deleteNotify(notifyId, progressMessageId);
+      if (order.queueMessageId) await deleteNotify(notifyId, order.queueMessageId);
       return;
     }
 
@@ -557,7 +561,7 @@ async function processOrder(order) {
     });
     log(`order #${order.id} DONE success=${successCount} failed=${failedCount} remaining=${remainingCount}`);
     await editNotify(
-      order.telegramId,
+      notifyId,
       progressMessageId,
       renderProgress(
         order,
@@ -598,7 +602,7 @@ async function processOrder(order) {
     });
     if (bonusGranted > 0) {
       await notify(
-        order.telegramId,
+        notifyId,
         [
           "🎉 <b>Selamat! Bonus Loyalitas</b>",
           "",
@@ -610,7 +614,7 @@ async function processOrder(order) {
     }
 
     await notify(
-      order.telegramId,
+      notifyId,
       [
         `Order #${order.id} selesai.`,
         "",
@@ -624,15 +628,15 @@ async function processOrder(order) {
       ].filter(Boolean).join("\n")
     );
     if (successCount > 0) {
-      await sendDocument(order.telegramId, resultFile, `Hasil akun berhasil ngait order #${order.id}`);
+      await sendDocument(notifyId, resultFile, `Hasil akun berhasil ngait order #${order.id}`);
     }
     if (notRegisteredCount > 0) {
-      await sendDocument(order.telegramId, notRegisteredFile, `Gsuite tidak terdaftar order #${order.id}`);
+      await sendDocument(notifyId, notRegisteredFile, `Gsuite tidak terdaftar order #${order.id}`);
     }
     if (remainingCount > 0) {
-      await sendDocument(order.telegramId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
+      await sendDocument(notifyId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
       await notify(
-        order.telegramId,
+        notifyId,
         `🔁 Mau ngait ulang <b>${remainingCount} akun gagal</b> pakai saldo kamu?`,
         { inline_keyboard: [[{ text: `🔁 Retry ${remainingCount} akun (pakai saldo)`, callback_data: `retry_${order.id}` }]] }
       );
@@ -640,7 +644,7 @@ async function processOrder(order) {
 
     // Kirim juga hasil ke admin (rekap) saat order selesai.
     for (const adminId of ADMIN_IDS) {
-      if (String(adminId) === String(order.telegramId)) continue;
+      if (String(adminId) === String(notifyId)) continue;
       await notify(
         adminId,
         [
@@ -655,9 +659,9 @@ async function processOrder(order) {
       if (remainingCount > 0) await sendDocument(adminId, remainingUnverifiedFile, `[ADMIN] Sisa gagal order #${order.id}`);
     }
 
-    await deleteNotify(order.telegramId, progressMessageId);
+    await deleteNotify(notifyId, progressMessageId);
     if (order.queueMessageId) {
-      await deleteNotify(order.telegramId, order.queueMessageId);
+      await deleteNotify(notifyId, order.queueMessageId);
     }
   } catch (error) {
     log(`order #${order.id} FAILED ${error.message}`);
@@ -666,7 +670,7 @@ async function processOrder(order) {
       error: error.message,
       finishedAt: new Date().toISOString(),
     });
-    await notify(order.telegramId, `Order #${order.id} gagal: ${error.message}`);
+    await notify(notifyId, `Order #${order.id} gagal: ${error.message}`);
   }
 }
 
