@@ -26,7 +26,7 @@ function hmac512Hex(key, str) {
   return crypto.createHmac("sha512", key).update(str, "utf8").digest("hex");
 }
 
-async function getMutasiQris({ username, authToken, type = "" }) {
+async function getMutasiQris({ username, authToken, type = "", page = 1 }) {
   const apiUrl = "https://app.orderkuota.com/api/v2/qris/mutasi";
   const accountId = String(authToken || "").split(":")[0] || "";
   const appRegId = process.env.ORDERKUOTA_APP_REG_ID;
@@ -47,7 +47,7 @@ async function getMutasiQris({ username, authToken, type = "" }) {
     phone_android_version: androidVersion,
     app_version_code: appVersionCode,
     auth_username: username,
-    "requests[qris_history][page]": 1,
+    "requests[qris_history][page]": page,
     auth_token: authToken,
     app_version_name: appVersionName,
     ui_mode: uiMode,

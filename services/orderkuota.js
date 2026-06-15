@@ -118,12 +118,38 @@ async function getOrkutMutasi() {
     return { status: false, data: [], error: "Missing USERNAME_ORKUT/AUTH_TOKEN" };
   }
 
-  const response = await getMutasiQris({ username, authToken: token, type: "" });
+  // Cek beberapa page mutasi (default 2) -> lebih tahan kalau transaksi pembayaran sudah
+  // tergeser keluar page 1 (akun ramai / deteksi telat saat jaringan ngadat).
+  const pages = Math.max(1, Number(process.env.ORKUT_MUTASI_PAGES || 2));
+  let anyStatus = false;
+  let lastRaw = null;
+  const merged = [];
+  const seen = new Set();
+  for (let page = 1; page <= pages; page++) {
+    let response;
+    try {
+      response = await getMutasiQris({ username, authToken: token, type: "", page });
+    } catch (_) {
+      break; // jaringan error -> pakai apa yang sudah didapat
+    }
+    lastRaw = response;
+    if (response && response.status) {
+      anyStatus = true;
+      for (const item of normalizeMutasiResponse(response)) {
+        const key = `${item.raw?.issuer_reff || ""}|${item.amount}|${item.date}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(item);
+      }
+    } else {
+      break; // page gagal -> berhenti (jangan buang waktu)
+    }
+  }
 
   mutasiCache = {
-    status: Boolean(response && response.status),
-    data: normalizeMutasiResponse(response),
-    raw: response,
+    status: anyStatus,
+    data: merged,
+    raw: lastRaw,
   };
   mutasiCacheAt = Date.now();
   return mutasiCache;
