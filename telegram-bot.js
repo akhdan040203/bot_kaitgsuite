@@ -511,16 +511,18 @@ function kaitDraftKeyboard(session, opts = {}) {
     [{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }],
   ];
   if (accounts > 0 && credit >= accounts) {
-    // Credit cukup -> bayar penuh pakai credit (gratis).
-    rows.push([{ text: `💳 Bayar pakai Credit (${accounts} akun • GRATIS)`, callback_data: "confirm_kait" }]);
+    // Credit cukup -> PILIHAN: bayar pakai credit (gratis) ATAU QRIS penuh (simpan credit).
+    rows.push([{ text: `💳 Bayar pakai Credit (${accounts} akun • GRATIS)`, callback_data: "pay_credit" }]);
+    rows.push([{ text: `🧾 Bayar QRIS penuh (simpan credit)`, callback_data: "pay_qris" }]);
   } else if (credit > 0) {
-    // Ada credit tapi kurang -> 2 pilihan: pakai credit + QRIS sisa, atau topup credit dulu.
+    // Ada credit tapi kurang -> PILIHAN: kombinasi credit+QRIS, topup credit, atau QRIS penuh.
     const kurang = accounts - credit;
-    rows.push([{ text: `💳 ${credit} credit + QRIS ${kurang} akun`, callback_data: "confirm_kait" }]);
+    rows.push([{ text: `💳 ${credit} credit + QRIS ${kurang} akun`, callback_data: "pay_credit" }]);
     rows.push([{ text: `➕ Topup Credit (${kurang} akun)`, callback_data: "topup_credit" }]);
+    rows.push([{ text: `🧾 Bayar QRIS penuh (simpan credit)`, callback_data: "pay_qris" }]);
   } else {
     // Tidak ada credit -> QRIS saja.
-    rows.push([{ text: "🧾 Bayar QRIS", callback_data: "confirm_kait" }]);
+    rows.push([{ text: "🧾 Bayar QRIS", callback_data: "pay_qris" }]);
   }
   rows.push([{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }]);
   rows.push([{ text: "Batal", callback_data: "cancel_session" }]);
@@ -613,7 +615,9 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   const users = await usersStore.read();
   const user = users[String(from.id)];
   const voucher = session.voucher ? await getActiveVoucher(session.voucher.code) : null;
-  const pricing = computeOrderPricing(parsed.valid.length, settings, user, voucher);
+  // Kalau user pilih "Bayar QRIS penuh (simpan credit)" -> jangan pakai credit (credit = 0).
+  const pricingUser = session.useCredit === false ? { ...user, credit: 0 } : user;
+  const pricing = computeOrderPricing(parsed.valid.length, settings, pricingUser, voucher);
 
   const now = new Date().toISOString();
   const isFree = pricing.afterDiscount <= 0;
@@ -1315,6 +1319,8 @@ async function handleAdminCommand(chatId, text) {
         "/orders",
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
+        "/progres ORDER_ID PERSEN  (update bar progres ke customer)",
+        "/kirimhasil ORDER_ID  (kirim file .txt + caption -> hasil ke customer)",
         "/users  (daftar user + ID + saldo)",
         "/saldo USER_ID|@username  (cek credit user)",
         "/addsaldo USER_ID|@username JUMLAH  (credit = jumlah akun)",
@@ -1651,13 +1657,183 @@ async function handleAdminCommand(chatId, text) {
     return true;
   }
 
+  if (command === "/progres" || command === "/progress") {
+    const orderId = String(args[0] || "").replace(/^#+/, "").trim();
+    const percent = Math.max(0, Math.min(100, Number(args[1])));
+    if (!orderId || !Number.isFinite(percent)) {
+      await sendMessage(chatId, "Format: /progres ORDER_ID PERSEN\nContoh: /progres 1781525787476 50");
+      return true;
+    }
+    const orders = await ordersStore.read();
+    const order = orders.find((o) => String(o.id) === String(orderId));
+    if (!order) {
+      await sendMessage(chatId, `Order #${orderId} tidak ditemukan.`);
+      return true;
+    }
+    const total = Math.max(1, Number(order.totalAccounts || 0));
+    const done = Math.round((total * percent) / 100);
+    const customerId = order.telegramId;
+    const text = renderCustomerProgress(orderId, order.region, done, total);
+    // Edit pesan progres yang SAMA kalau sudah ada (biar bar update di tempat), else kirim baru.
+    let msgId = order.adminProgressMessageId || null;
+    if (msgId) {
+      try {
+        await tg("editMessageText", { chat_id: customerId, message_id: msgId, text, parse_mode: "HTML", disable_web_page_preview: true });
+      } catch (e) {
+        if (!String(e.message || "").includes("not modified")) msgId = null; // pesan hilang -> kirim baru
+      }
+    }
+    if (!msgId) {
+      const sent = await sendMessage(customerId, text);
+      msgId = sent && sent.message_id;
+    }
+    const num = Number(orderId);
+    const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+    await ordersStore.patchItem("id", idValues, { adminProgressMessageId: msgId, adminProgressChatId: String(customerId) });
+    await sendMessage(chatId, `📊 Progres order #${orderId} → ${percent}% (${done}/${total}) terkirim ke customer.`);
+    return true;
+  }
+
+  if (command === "/kirimhasil" || command === "/hasil") {
+    await sendMessage(
+      chatId,
+      [
+        "📤 <b>Kirim Hasil ke Customer</b>",
+        "",
+        "Caranya: <b>kirim file .txt hasil ngait</b> (yang kamu proses manual),",
+        "lalu beri <b>caption</b>:",
+        "<code>/kirimhasil ORDER_ID</code>",
+        "",
+        "Bot akan kirim file + notif selesai ke customer & tandai order DONE.",
+      ].join("\n")
+    );
+    return true;
+  }
+
   return false;
+}
+
+// Bar progres untuk customer (format mirip saat ngait normal).
+function renderCustomerProgress(orderId, region, done, total) {
+  const safeTotal = Math.max(1, Number(total || 0));
+  const d = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  return [
+    `🔗 <b>Ngait Order #${orderId}</b>`,
+    `🌍 ${regionLabel(region)}`,
+    `<code>${miniBar(d, safeTotal)}</code>`,
+    `${d}/${safeTotal} gsuite`,
+  ].join("\n");
+}
+
+// ADMIN: kirim file hasil ngait (yang diproses admin manual) ke CUSTOMER + notif + tandai DONE.
+// Cara pakai: admin kirim file .txt hasil ngait dengan CAPTION: /kirimhasil ORDER_ID
+async function sendOrderResultToCustomer(adminChatId, message) {
+  const caption = String(message.caption || "").trim();
+  const orderId = String(caption.split(/\s+/)[1] || "").replace(/^#+/, "").trim();
+  if (!orderId) {
+    await sendMessage(adminChatId, "Format: kirim file .txt hasil ngait dengan caption:\n/kirimhasil ORDER_ID");
+    return;
+  }
+  const orders = await ordersStore.read();
+  const order = orders.find((o) => String(o.id) === String(orderId));
+  if (!order) {
+    await sendMessage(adminChatId, `Order #${orderId} tidak ditemukan.`);
+    return;
+  }
+  const fileId = message.document.file_id;
+  let count = 0;
+  try {
+    const content = await downloadTelegramFile(fileId);
+    count = content.split(/\r?\n/).filter((l) => l.trim()).length;
+  } catch (_) {}
+
+  const customerId = order.telegramId;
+  const total = Math.max(1, Number(order.totalAccounts || count));
+
+  // 0) Animasi bar progres ke customer (mirip ngait normal). Kalau sudah ada pesan progres
+  //    dari /progres, lanjutkan/edit pesan itu (jangan bikin baru).
+  try {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const frames = [0, Math.round(count * 0.34), Math.round(count * 0.67), count];
+    let progMsgId = order.adminProgressMessageId || null;
+    if (!progMsgId) {
+      const prog = await sendMessage(customerId, renderCustomerProgress(orderId, order.region, frames[0], total));
+      progMsgId = prog && prog.message_id;
+    }
+    for (let i = 1; i < frames.length; i++) {
+      await sleep(900);
+      if (progMsgId) {
+        await tg("editMessageText", {
+          chat_id: customerId,
+          message_id: progMsgId,
+          text: renderCustomerProgress(orderId, order.region, frames[i], total),
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        }).catch(() => {});
+      }
+    }
+  } catch (_) {}
+
+  // 1) Notif progres/selesai ke customer.
+  try {
+    await sendMessage(
+      customerId,
+      [
+        `✅ <b>Order #${orderId} selesai!</b>`,
+        "",
+        `🌍 Region: ${regionLabel(order.region)}`,
+        `Total akun: ${order.totalAccounts || count}`,
+        `Berhasil ngait: <b>${count}</b> akun`,
+        "",
+        "Hasil ngait ada di file berikut 👇 Terima kasih sudah order! 🙏",
+      ].join("\n")
+    );
+  } catch (e) {
+    await sendMessage(adminChatId, `⚠️ Gagal kirim notif ke customer (${customerId}): ${e.message}`);
+  }
+  // 2) Kirim file hasil ke customer (resend by file_id, tanpa re-upload).
+  try {
+    await tg("sendDocument", {
+      chat_id: customerId,
+      document: fileId,
+      caption: `✅ Hasil ngait order #${orderId} — ${count} akun`,
+    });
+  } catch (e) {
+    await sendMessage(adminChatId, `⚠️ Gagal kirim file ke customer: ${e.message}`);
+    return;
+  }
+  // 3) Tandai order DONE (diproses admin). Tambah totalKait customer (sekali saja).
+  if (!order.processedByAdmin) {
+    await usersStore.update((users) => {
+      const u = users[String(customerId)];
+      if (u) u.totalKait = Number(u.totalKait || 0) + count;
+      return users;
+    });
+  }
+  const num = Number(orderId);
+  const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+  await ordersStore.patchItem("id", idValues, {
+    status: "DONE",
+    successCount: count,
+    processedByAdmin: true,
+    finishedAt: new Date().toISOString(),
+  });
+  await sendMessage(
+    adminChatId,
+    `✅ Hasil order #${orderId} (${count} akun) terkirim ke customer ${order.username ? "@" + order.username : customerId} & order ditandai DONE.`
+  );
 }
 
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const from = message.from || message.chat;
   await upsertUser(from);
+
+  // ADMIN: kirim hasil ngait manual ke customer -> file .txt dengan caption "/kirimhasil ORDER_ID".
+  if (isAdmin(chatId) && message.document && /^\/(kirimhasil|hasil)\b/i.test(message.caption || "")) {
+    await sendOrderResultToCustomer(chatId, message);
+    return;
+  }
 
   const text = message.text || "";
   if (text.startsWith("/") && isAdmin(chatId) && (await handleAdminCommand(chatId, text))) return;
@@ -1951,7 +2127,15 @@ async function handleCallback(query) {
     return;
   }
 
-  if (data === "confirm_kait") return createOrderFromSession(chatId, from, query.message?.message_id);
+  if (data === "confirm_kait" || data === "pay_credit" || data === "pay_qris") {
+    const session = sessions.get(String(chatId));
+    if (session) {
+      // pay_qris = bayar QRIS penuh TANPA pakai credit (credit disimpan). Selain itu pakai credit.
+      session.useCredit = data !== "pay_qris";
+      sessions.set(String(chatId), session);
+    }
+    return createOrderFromSession(chatId, from, query.message?.message_id);
+  }
   if (data === "topup_credit") return createCreditTopup(chatId, from, query.message?.message_id);
   if (data === "apply_voucher") {
     const session = sessions.get(String(chatId));
