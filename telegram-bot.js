@@ -1684,7 +1684,21 @@ async function handleAdminCommand(chatId, text) {
     const num = Number(orderId);
     const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
     await ordersStore.patchItem("id", idValues, { notifyTo: buyerId });
-    await sendMessage(chatId, `✅ Order #${orderId}: progres & hasil (real-time dari worker) akan dikirim ke BUYER <code>${buyerId}</code>.`);
+    // Test DM ke buyer -> bot TIDAK bisa kirim ke user yang belum pernah /start.
+    try {
+      await sendMessage(buyerId, `🔔 Kamu akan menerima update progres order #${orderId} di sini.`);
+    } catch (e) {
+      await sendMessage(
+        chatId,
+        [
+          `⚠️ notifyTo order #${orderId} = ${buyerId} (tersimpan), TAPI bot GAGAL DM buyer: ${e.message}`,
+          "",
+          "👉 Suruh BUYER kirim /start ke bot ini dulu. Bot tidak bisa mengirim ke user yang belum pernah memulai chat.",
+        ].join("\n")
+      );
+      return true;
+    }
+    await sendMessage(chatId, `✅ Order #${orderId}: progres & hasil (real-time dari worker) dikirim ke BUYER <code>${buyerId}</code>. (Test DM berhasil.)`);
     return true;
   }
 
@@ -1715,13 +1729,29 @@ async function handleAdminCommand(chatId, text) {
       }
     }
     if (!msgId) {
-      const sent = await sendMessage(customerId, text);
-      msgId = sent && sent.message_id;
+      try {
+        const sent = await sendMessage(customerId, text);
+        msgId = sent && sent.message_id;
+      } catch (e) {
+        // Gagal kirim ke buyer (paling sering: buyer belum /start bot).
+        await sendMessage(
+          chatId,
+          [
+            `⚠️ GAGAL kirim progres ke ${customerId}: ${e.message}`,
+            "",
+            order.notifyTo ? `Tujuan: BUYER (notifyTo=${order.notifyTo})` : `Tujuan: pemilik order (telegramId=${order.telegramId})`,
+            "",
+            "Penyebab umum: BUYER belum pernah /start bot ini (bot tidak bisa DM user yang belum start),",
+            "atau ID/username salah. Suruh buyer kirim /start ke bot, lalu coba lagi.",
+          ].join("\n")
+        );
+        return true;
+      }
     }
     const num = Number(orderId);
     const idValues = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
     await ordersStore.patchItem("id", idValues, { adminProgressMessageId: msgId, adminProgressChatId: String(customerId), adminProgressDone: done });
-    await sendMessage(chatId, `📊 Progres order #${orderId} → ${percent}% (${done}/${total}) terkirim ke customer.`);
+    await sendMessage(chatId, `📊 Progres order #${orderId} → ${percent}% (${done}/${total}) terkirim ke ${order.notifyTo ? "BUYER " + order.notifyTo : "pemilik order " + order.telegramId}.`);
     return true;
   }
 
