@@ -2017,8 +2017,15 @@ async function poll() {
         if (update.callback_query) await handleCallback(update.callback_query);
       }
     } catch (error) {
-      console.error(`[bot] ${error.message}`);
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const code = error.response && error.response.status;
+      if (code === 409) {
+        // 409 Conflict = ADA INSTANCE BOT LAIN yang polling token sama.
+        console.error("[bot] 409 Conflict: ADA bot lain jalan dengan token sama! Pastikan HANYA 1 instance bot. Menunggu...");
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+      } else {
+        console.error(`[bot] ${error.message}`);
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
     }
   }
 }
@@ -2026,6 +2033,13 @@ async function poll() {
 async function main() {
   await connectMongo();
   log("MongoDB connected.");
+
+  // Hapus webhook (kalau pernah ke-set) supaya getUpdates polling tidak bentrok -> hindari 409.
+  try {
+    await tg("deleteWebhook", { drop_pending_updates: false });
+  } catch (error) {
+    console.error(`[bot] deleteWebhook: ${error.message}`);
+  }
 
   registerBotCommands()
     .then(() => log("bot commands registered"))
