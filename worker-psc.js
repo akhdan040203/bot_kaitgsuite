@@ -688,20 +688,34 @@ async function loop() {
   if (resetCount > 0) log(`recovery: ${resetCount} order RUNNING di-reset ke QUEUED`);
   log("PSC worker started.");
   while (true) {
-    const orders = await ordersStore.read();
-    const order = orders.find((item) => item.status === "QUEUED" || item.status === "PAID");
-    if (!order) {
-      const now = Date.now();
-      if (now - lastIdleLogAt > 30000) {
-        log("idle, waiting for queued orders...");
-        lastIdleLogAt = now;
+    try {
+      const orders = await ordersStore.read();
+      const order = orders.find((item) => item.status === "QUEUED" || item.status === "PAID");
+      if (!order) {
+        const now = Date.now();
+        if (now - lastIdleLogAt > 30000) {
+          log("idle, waiting for queued orders...");
+          lastIdleLogAt = now;
+        }
+        await sleep(POLL_MS);
+        continue;
       }
+      await processOrder(order);
+    } catch (error) {
+      // Error transient (mis. jaringan/Mongo ECONNRESET) -> JANGAN matikan worker, lanjut loop.
+      log(`loop error (lanjut): ${error.message}`);
       await sleep(POLL_MS);
-      continue;
     }
-    await processOrder(order);
   }
 }
+
+// Jaring pengaman: error jaringan transient jangan mematikan worker.
+process.on("unhandledRejection", (reason) => {
+  log(`unhandledRejection (diabaikan, worker tetap jalan): ${reason && reason.message ? reason.message : reason}`);
+});
+process.on("uncaughtException", (error) => {
+  log(`uncaughtException (diabaikan, worker tetap jalan): ${error && error.message ? error.message : error}`);
+});
 
 loop().catch((error) => {
   console.error(error);

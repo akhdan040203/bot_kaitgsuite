@@ -2032,10 +2032,25 @@ async function main() {
     .catch((error) => console.error(`[bot] failed to register commands: ${error.message}`));
 
   console.log("Telegram bot started.");
-  setInterval(autoCheckPayments, Number(process.env.PAYMENT_CHECK_INTERVAL_MS || 15000));
-  setInterval(tickLiveQueues, Number(process.env.QUEUE_AUTOREFRESH_MS || 5000));
+  // Bungkus .catch supaya rejection dari interval TIDAK jadi unhandledRejection (yang bikin bot exit).
+  setInterval(() => {
+    autoCheckPayments().catch((e) => console.error(`[payment] tick error: ${e.message}`));
+  }, Number(process.env.PAYMENT_CHECK_INTERVAL_MS || 15000));
+  setInterval(() => {
+    tickLiveQueues().catch((e) => console.error(`[queue] tick error: ${e.message}`));
+  }, Number(process.env.QUEUE_AUTOREFRESH_MS || 5000));
   poll();
 }
+
+// Jaring pengaman: error jaringan transient (ECONNRESET, socket hang up, timeout, dll) JANGAN
+// mematikan bot. Cukup di-log, proses tetap hidup -> bot tidak "off sendiri".
+process.on("unhandledRejection", (reason) => {
+  const msg = reason && reason.message ? reason.message : String(reason);
+  console.error(`[bot] unhandledRejection (diabaikan, bot tetap jalan): ${msg}`);
+});
+process.on("uncaughtException", (error) => {
+  console.error(`[bot] uncaughtException (diabaikan, bot tetap jalan): ${error && error.message ? error.message : error}`);
+});
 
 main().catch((error) => {
   console.error(`[bot] fatal: ${error.message}`);
