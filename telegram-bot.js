@@ -212,16 +212,16 @@ function isAdmin(chatId) {
 function mainKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "🔗 Kait PSC", callback_data: "kait_psc" }],
+      [{ text: "🛒 Kait PSC — Order Sekarang", callback_data: "kait_psc" }],
       [
         { text: "📋 Antrian", callback_data: "queue" },
-        { text: "🏷️ Info & Harga", callback_data: "price_info" },
+        { text: "🌍 Region", callback_data: "region_menu" },
       ],
       [
+        { text: "🏷️ Info & Harga", callback_data: "price_info" },
         { text: "🔄 Convert Format", callback_data: "convert_format" },
-        { text: "💬 Bantuan", callback_data: "help" },
       ],
-      [{ text: "🌍 Pilih Region", callback_data: "region_menu" }],
+      [{ text: "💬 Bantuan & Support", callback_data: "help" }],
     ],
   };
 }
@@ -388,13 +388,20 @@ async function upsertUser(from) {
   return users[id];
 }
 
+let _botStatsCache = null;
+let _botStatsAt = 0;
 async function botStats() {
+  // Cache statistik (baca seluruh orders+users itu berat) -> /start & /admin jadi cepat.
+  const ttl = Number(process.env.BOT_STATS_CACHE_MS || 30000);
+  if (_botStatsCache && Date.now() - _botStatsAt < ttl) return _botStatsCache;
   const users = await usersStore.read();
   const orders = await ordersStore.read();
   const totalKait = orders
     .filter((order) => order.status === "DONE")
     .reduce((sum, order) => sum + Number(order.successCount || 0), 0);
-  return { totalUsers: Object.keys(users).length, totalKait };
+  _botStatsCache = { totalUsers: Object.keys(users).length, totalKait };
+  _botStatsAt = Date.now();
+  return _botStatsCache;
 }
 
 async function showHome(chatId, from) {
@@ -410,25 +417,35 @@ async function showHome(chatId, from) {
   const nextMilestone = (Math.floor(userKait / milestoneStep) + 1) * milestoneStep;
   const toNext = Math.max(0, nextMilestone - userKait);
 
+  const fmt = (n) => Number(n || 0).toLocaleString("id-ID");
+  const minPrice = Math.min(...getPriceTiers(settings).map((t) => t.pricePerAccount));
+  const line = "━━━━━━━━━━━━━━━";
+
   const homeText = [
-    `Halo ${user.firstName || "User"}`,
+    `👋 Halo, <b>${user.firstName || "User"}</b>!`,
+    "Selamat datang di <b>Premkuy Store</b> 🎉",
     "",
-    "<b>User Info</b>",
-    `L ID: <code>${user.telegramId}</code>`,
-    `L Username: ${username}`,
-    `L Total Kait: ${user.totalKait || 0}`,
-    `L Credit Ngait: ${user.credit || 0} akun`,
-    `L Total Pengeluaran: ${formatRupiah(user.totalSpend || 0)}`,
+    line,
+    "👤 <b>Akun Kamu</b>",
+    `🆔 ID: <code>${user.telegramId}</code>`,
+    `🏷️ Username: ${username}`,
+    `🔗 Total Kait: <b>${fmt(user.totalKait)}</b>`,
+    `🎁 Credit: <b>${fmt(user.credit)}</b> akun`,
+    `💸 Pengeluaran: <b>${formatRupiah(user.totalSpend || 0)}</b>`,
     "",
-    "<b>Bot Info</b>",
-    `L Total Ngait (semua user): ${stats.totalKait}`,
-    `L Milestone: tiap ${milestoneStep} ngait → +${milestonePer} credit`,
-    `L Progress kamu: ${userKait}/${nextMilestone} (kurang ${toNext} ngait lagi → +${milestonePer} credit)`,
+    line,
+    "📊 <b>Info Bot</b>",
+    `🌐 Total Ngait (semua user): <b>${fmt(stats.totalKait)}</b>`,
+    `🏆 Milestone: tiap <b>${fmt(milestoneStep)}</b> ngait → <b>+${milestonePer} credit</b>`,
+    `📈 Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
+    `<code>${miniBar(userKait % milestoneStep, milestoneStep)}</code>`,
+    `   kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
     "",
-    "<b>Configuration</b>",
-    "L Payment: QRIS",
-    `L Harga: mulai ${formatRupiah(Math.min(...getPriceTiers(settings).map((t) => t.pricePerAccount)))} / akun`,
-    `L Support: ${formatTelegramSupport(settings.support)}`,
+    line,
+    "⚙️ <b>Konfigurasi</b>",
+    "💳 Pembayaran: QRIS",
+    `🏷️ Harga: mulai <b>${formatRupiah(minPrice)}</b> / akun`,
+    `🆘 Support: ${formatTelegramSupport(settings.support)}`,
   ].join("\n");
 
   if (fs.existsSync(START_LOGO_PATH)) {
@@ -2263,8 +2280,14 @@ async function poll() {
       if (!data.ok) throw new Error(data.description || "getUpdates failed");
       for (const update of data.result) {
         updateOffset = update.update_id + 1;
-        if (update.message) await handleMessage(update.message);
-        if (update.callback_query) await handleCallback(update.callback_query);
+        // JANGAN await handler -> poll lanjut ambil update berikutnya (anti head-of-line block,
+        // bot lebih responsif walau satu handler lambat). Error per-handler di-catch sendiri.
+        if (update.message) {
+          handleMessage(update.message).catch((e) => console.error(`[bot] handleMessage: ${e.message}`));
+        }
+        if (update.callback_query) {
+          handleCallback(update.callback_query).catch((e) => console.error(`[bot] handleCallback: ${e.message}`));
+        }
       }
     } catch (error) {
       const code = error.response && error.response.status;
