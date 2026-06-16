@@ -418,7 +418,6 @@ async function showHome(chatId, from) {
   const toNext = Math.max(0, nextMilestone - userKait);
 
   const fmt = (n) => Number(n || 0).toLocaleString("id-ID");
-  const minPrice = Math.min(...getPriceTiers(settings).map((t) => t.pricePerAccount));
   const line = "━━━━━━━━━━━━━━━";
 
   const homeText = [
@@ -435,16 +434,13 @@ async function showHome(chatId, from) {
     "",
     line,
     "📊 <b>Info Bot</b>",
-    `🌐 Total Ngait (semua user): <b>${fmt(stats.totalKait)}</b>`,
-    `🏆 Milestone: tiap <b>${fmt(milestoneStep)}</b> ngait → <b>+${milestonePer} credit</b>`,
+    `🌐 Total Terkait: <b>${fmt(stats.totalKait)}</b>`,
+    `🏆 Milestone: <b>${fmt(milestoneStep)}</b> terkait (bonus +${milestonePer} credit)`,
     `📈 Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
     `<code>${miniBar(userKait % milestoneStep, milestoneStep)}</code>`,
     `   kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
     "",
     line,
-    "⚙️ <b>Konfigurasi</b>",
-    "💳 Pembayaran: QRIS",
-    `🏷️ Harga: mulai <b>${formatRupiah(minPrice)}</b> / akun`,
     `🆘 Support: ${formatTelegramSupport(settings.support)}`,
   ].join("\n");
 
@@ -2051,19 +2047,12 @@ async function handleCallback(query) {
     const users = await usersStore.read();
     const settings = await settingsStore.read();
     const cur = normalizeRegion((users[String(from.id)] || {}).region, settings);
-    await tg("editMessageText", {
-      chat_id: chatId,
-      message_id: query.message?.message_id,
-      text: [
-        "🌍 <b>Pilih Region</b>",
-        "",
-        `Region aktif: <b>${regionLabel(cur)}</b>`,
-      ].join("\n"),
-      parse_mode: "HTML",
-      reply_markup: regionMenuKeyboard(cur, settings),
-    }).catch(async () => {
-      await sendMessage(chatId, "🌍 Pilih Region:", { reply_markup: regionMenuKeyboard(cur, settings) });
-    });
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home -> tampil region saja
+    await sendMessage(
+      chatId,
+      ["🌍 <b>Pilih Region</b>", "", `Region aktif: <b>${regionLabel(cur)}</b>`].join("\n"),
+      { reply_markup: regionMenuKeyboard(cur, settings) }
+    );
     return;
   }
 
@@ -2162,9 +2151,12 @@ async function handleCallback(query) {
 
   if (data === "kait_psc") {
     const settings = await settingsStore.read();
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home
     const promptMsg = await sendMessage(
       chatId,
       [
+        "🛒 <b>Kait PSC — Order</b>",
+        "",
         "<b>Format: email|password</b>",
         `Min: ${getMinOrderForChat(chatId, settings)} akun`,
         "",
@@ -2181,7 +2173,8 @@ async function handleCallback(query) {
 
   if (data === "convert_format") {
     sessions.set(String(chatId), { mode: "awaiting_convert" });
-    await sendMessage(chatId, "Kirim list akun atau upload file .txt untuk convert format.", {
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home
+    await sendMessage(chatId, "🔄 <b>Convert Format</b>\n\nKirim list akun atau upload file .txt untuk convert format.", {
       reply_markup: backButton(),
     });
     return;
@@ -2236,13 +2229,17 @@ async function handleCallback(query) {
     await sendMessage(chatId, "Dibatalkan.");
     return;
   }
-  if (data === "queue") return showQueue(chatId, from.id);
+  if (data === "queue") {
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home -> tampil antrian saja
+    return showQueue(chatId, from.id);
+  }
   if (data === "refresh_queue") {
     await deleteMessage(chatId, query.message?.message_id);
     return showQueue(chatId, from.id);
   }
   if (data === "price_info") {
     const settings = await settingsStore.read();
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home
     await sendMessage(
       chatId,
       [
@@ -2260,7 +2257,8 @@ async function handleCallback(query) {
   }
   if (data === "help") {
     const settings = await settingsStore.read();
-    await sendMessage(chatId, `Support: ${formatTelegramSupport(settings.support)}`, {
+    await deleteMessage(chatId, query.message?.message_id); // hapus menu home
+    await sendMessage(chatId, `🆘 <b>Bantuan & Support</b>\n\nSupport: ${formatTelegramSupport(settings.support)}`, {
       reply_markup: backButton(),
     });
     return;
