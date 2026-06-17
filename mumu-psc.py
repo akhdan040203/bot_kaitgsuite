@@ -1249,6 +1249,7 @@ class EmulatorAutomator:
             self.log_info("Sudah di halaman payment methods, lanjut tanpa restart Play Store")
             return True
 
+        auth_err_count = 0  # hitung "Authentication Error" -> retry terbatas, lalu gagal (jangan stuck)
         for attempt in range(1, tries + 1):
             self.close_notification_shade()
             self.device.press("home")
@@ -1271,6 +1272,23 @@ class EmulatorAutomator:
                 if home_ready():
                     state = "home"
                     break
+                # Authentication Error (Google auth gagal) -> Retry TERBATAS, lalu Cancel & gagal.
+                try:
+                    if (self.device(textContains="Authentication Error").exists(timeout=0)
+                            or self.device(textContains="authenticating your request").exists(timeout=0)):
+                        auth_err_count += 1
+                        if auth_err_count <= int(os.getenv("PSC_AUTH_RETRY", "2")):
+                            self.log_warn(f"Authentication Error (Google) -> klik Retry ({auth_err_count}/{os.getenv('PSC_AUTH_RETRY','2')})")
+                            self.device(text="Retry").click_exists(timeout=action_timeout(1))
+                            pause(action_timeout(3))
+                            blank_since = time.time()
+                            continue
+                        else:
+                            self.log_error("Authentication Error BERULANG -> Cancel & tandai gagal (akun bermasalah / jaringan-VPN tidak stabil)")
+                            self.device(text="Cancel").click_exists(timeout=action_timeout(1))
+                            return False
+                except Exception:
+                    pass
                 # Klik 'Try again' kalau error koneksi.
                 clicked = False
                 for em in error_markers:
