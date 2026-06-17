@@ -1345,7 +1345,7 @@ async function handleAdminCommand(chatId, text) {
         "/users  (daftar user + ID + saldo)",
         "/saldo USER_ID|@username  (cek credit user)",
         "/addsaldo USER_ID|@username JUMLAH  (credit = jumlah akun)",
-        "/broadcast pesan",
+        "/broadcast pesan  (atau kirim FOTO + caption /broadcast pesan)",
         "/pause",
         "/resume",
       ].join("\n"),
@@ -1656,7 +1656,7 @@ async function handleAdminCommand(chatId, text) {
   if (command === "/broadcast") {
     const message = args.join(" ").trim();
     if (!message) {
-      await sendMessage(chatId, "Format: /broadcast pesan");
+      await sendMessage(chatId, "Format: /broadcast pesan\n\n📷 Mau pakai FOTO? Kirim foto dengan caption: /broadcast pesan");
       return true;
     }
     const users = await usersStore.read();
@@ -1910,6 +1910,31 @@ async function sendOrderResultToCustomer(adminChatId, message) {
   );
 }
 
+// ADMIN: broadcast FOTO + caption ke semua user. Foto dikirim by file_id (tanpa upload ulang).
+async function broadcastPhoto(adminChatId, message) {
+  const caption = String(message.caption || "").replace(/^\/broadcast\s*/i, "").trim();
+  const photos = message.photo || [];
+  const fileId = photos.length ? photos[photos.length - 1].file_id : null; // ambil resolusi terbesar
+  if (!fileId) {
+    await sendMessage(adminChatId, "Foto tidak terbaca. Kirim foto dengan caption /broadcast pesan.");
+    return;
+  }
+  const users = await usersStore.read();
+  let sent = 0;
+  for (const id of Object.keys(users)) {
+    try {
+      await tg("sendPhoto", {
+        chat_id: id,
+        photo: fileId,
+        caption: caption || undefined,
+        parse_mode: "HTML",
+      });
+      sent++;
+    } catch (_) {}
+  }
+  await sendMessage(adminChatId, `📢 Broadcast foto terkirim ke ${sent} user.`);
+}
+
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const from = message.from || message.chat;
@@ -1918,6 +1943,12 @@ async function handleMessage(message) {
   // ADMIN: kirim hasil ngait manual ke customer -> file .txt dengan caption "/kirimhasil ORDER_ID".
   if (isAdmin(chatId) && message.document && /^\/(kirimhasil|hasil)\b/i.test(message.caption || "")) {
     await sendOrderResultToCustomer(chatId, message);
+    return;
+  }
+
+  // ADMIN: broadcast dengan FOTO -> kirim foto + caption "/broadcast pesan".
+  if (isAdmin(chatId) && message.photo && /^\/broadcast\b/i.test(message.caption || "")) {
+    await broadcastPhoto(chatId, message);
     return;
   }
 

@@ -1408,6 +1408,19 @@ class EmulatorAutomator:
                 return "NOT_REGISTERED"
             if not login_result:
                 self.log_error(f"Google login/register failed for {email}")
+                # Hitung gagal login. Kalau sudah >= limit -> BATAL permanen (jangan retry lagi),
+                # catat sebagai tidak didukung, dan worker akan laporkan ke buyer.
+                limit = int(os.getenv("PSC_LOGIN_FAIL_LIMIT", "10"))
+                fails = self._bump_login_fail(email)
+                self.log_warn(f"Login gagal {email} (ke-{fails}/{limit})")
+                if fails >= limit:
+                    self.log_error(f"Login {email} gagal {fails}x -> BATAL & tandai tidak didukung (tidak di-retry lagi)")
+                    self.save_not_registered(email, password)
+                    try:
+                        self.device.press("back"); pause(0.3); self.device.press("back")
+                    except Exception:
+                        pass
+                    return "NOT_REGISTERED"  # main loop -> hapus dari input (skip permanen)
                 return False
             self.emit_progress(email, 20, "login google berhasil")
 
@@ -1646,6 +1659,23 @@ class EmulatorAutomator:
             except Exception as e:
                 self.log_error(f"Error saving successful account {email}: {e}")
 
+    def _bump_login_fail(self, email):
+        """Hitung gagal login PERSISTEN per email (antar ronde, lewat file). Return total terbaru."""
+        path = os.path.join(os.path.dirname(RESULT_FILE) or ".", "login-fail.txt")
+        key = (email or "").strip().lower()
+        count = 0
+        try:
+            with self.result_file_lock:
+                with open(path, "a") as f:
+                    f.write(key + "\n")
+                with open(path) as f:
+                    for line in f:
+                        if line.strip().lower() == key:
+                            count += 1
+        except Exception as e:
+            self.log_error(f"Gagal update login-fail {email}: {e}")
+        return count
+
     def save_not_registered(self, email, password):
         """Catat akun gsuite yang tidak terdaftar (email tidak ditemukan) ke file terpisah."""
         try:
@@ -1811,6 +1841,9 @@ def fast_process_emulator(automator):
 
     processed_count = 0
     success_count = 0
+    consecutive_fail = 0  # gagal beruntun (untuk circuit breaker)
+    any_success = False
+    abort_after = int(os.getenv("PSC_ABORT_AFTER_FAILS", "50"))  # 0 = matikan breaker
 
     while True:
         try:
@@ -1829,12 +1862,23 @@ def fast_process_emulator(automator):
                 # Tidak terdaftar -> skip permanen, hapus dari input biar tidak di-retry.
                 remove_processed_account(email)
                 automator.log_info(f"SKIP (tidak terdaftar): {email}")
+                consecutive_fail += 1
             elif result:
                 success_count += 1
+                any_success = True
+                consecutive_fail = 0
                 remove_processed_account(email)
                 automator.log_info(f"SUCCESS: {success_count}/{processed_count} accounts processed successfully")
             else:
                 automator.log_info(f"FAILED: {success_count}/{processed_count} accounts processed successfully")
+                consecutive_fail += 1
+
+            # CIRCUIT BREAKER: kalau dari AWAL gagal terus (belum ada 1 pun sukses) dan sudah
+            # mencapai batas -> kemungkinan akun/jaringan bermasalah semua -> BATALKAN order.
+            if abort_after > 0 and not any_success and consecutive_fail >= abort_after:
+                automator.log_error(f"ABORT: {consecutive_fail} akun pertama GAGAL semua (belum ada sukses) -> batalkan order")
+                print(f"PSC_ABORT|{consecutive_fail} akun pertama gagal semua di awal (kemungkinan akun/jaringan bermasalah)", flush=True)
+                break
         except Empty:
             break
         except Exception as e:

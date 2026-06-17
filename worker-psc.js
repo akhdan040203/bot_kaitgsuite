@@ -216,6 +216,8 @@ function runPscWorker(order, attempt, onProgress) {
     });
     let stdoutBuffer = "";
     let stopped = false;
+    let aborted = false;
+    let abortReason = "";
 
     // Cek berkala: kalau admin membatalkan order, hentikan proses python.
     const cancelPoll = setInterval(() => {
@@ -247,6 +249,15 @@ function runPscWorker(order, attempt, onProgress) {
       stdoutBuffer = lines.pop() || "";
 
       for (const line of lines) {
+        // Sinyal ABORT dari Python (circuit breaker: banyak akun gagal di awal).
+        const ab = line.match(/^PSC_ABORT\|(.+)$/);
+        if (ab) {
+          aborted = true;
+          abortReason = ab[1].trim();
+          log(`order #${order.id} ABORT dari worker python: ${abortReason}`);
+          killChildTree(child);
+          continue;
+        }
         const match = line.match(/^PSC_PROGRESS\|([^|]+)\|(\d+)\|(.+)$/);
         if (!match || typeof onProgress !== "function") continue;
         onProgress({
@@ -276,6 +287,10 @@ function runPscWorker(order, attempt, onProgress) {
       clearInterval(cancelPoll);
       clearTimeout(killTimer);
       log(`attempt ${attempt}: mumu-psc.py exited with code ${code}`);
+      if (aborted) {
+        resolve({ resultFile, logFile, aborted: true, abortReason });
+        return;
+      }
       if (stopped) {
         resolve({ resultFile, logFile, stopped: true });
         return;
@@ -423,6 +438,7 @@ async function processOrder(order) {
       // Satu pass per round: mumu-psc.py memproses SELURUH akun sisa (input.txt) sekali jalan.
       // Round 1 = semua akun; round berikutnya = hanya yang masih gagal. Maks maxRetryRounds round.
       let stoppedThisRound = false;
+      let abortedReason = null;
       try {
         const r = await runPscWorker(order, `${round}`, (progress) => {
           updateRealtimeProgress(progress).catch((error) => {
@@ -432,9 +448,50 @@ async function processOrder(order) {
         resultFile = r.resultFile;
         logFile = r.logFile;
         stoppedThisRound = Boolean(r.stopped);
+        if (r.aborted) abortedReason = r.abortReason || "banyak akun gagal di awal";
       } catch (error) {
         log(`order #${order.id} round ${round} worker error: ${error.message}`);
       }
+
+      // AUTO-ABORT: banyak akun gagal di awal -> batalkan SELURUH order + refund + notif buyer.
+      if (abortedReason) {
+        const successNow = countLines(resultFile);
+        const refundAbort = Math.max(0, totalAccounts - successNow);
+        await updateOrder(order.id, {
+          status: "CANCELLED",
+          autoAborted: true,
+          successCount: successNow,
+          remainingCount: refundAbort,
+          finishedAt: new Date().toISOString(),
+        });
+        // Refund akun yang belum berhasil -> credit (buyer tidak rugi).
+        if (refundAbort > 0) {
+          await usersStore.update((users) => {
+            const u = users[order.telegramId];
+            if (u) u.credit = Number(u.credit || 0) + refundAbort;
+            return users;
+          });
+        }
+        log(`order #${order.id} AUTO-ABORT: ${abortedReason} (sukses ${successNow}, refund ${refundAbort})`);
+        if (successNow > 0) {
+          await sendDocument(notifyId, resultFile, `✅ Sebagian berhasil order #${order.id} — ${successNow} akun`).catch(() => {});
+        }
+        await notify(
+          notifyId,
+          [
+            `❌ <b>Order #${order.id} dibatalkan otomatis.</b>`,
+            "",
+            `Alasan: ${abortedReason}.`,
+            `Berhasil: ${successNow} • Dikembalikan: ${refundAbort} akun`,
+            refundAbort > 0 ? `\n🎁 ${refundAbort} akun dikembalikan jadi credit (bisa dipakai order berikutnya).` : "",
+            "\nKemungkinan akun gsuite bermasalah/tidak didukung, atau jaringan sedang gangguan. Silakan coba lagi nanti / ganti akun.",
+          ].filter(Boolean).join("\n")
+        );
+        await deleteNotify(notifyId, progressMessageId);
+        if (order.queueMessageId) await deleteNotify(notifyId, order.queueMessageId);
+        return; // hentikan proses order ini
+      }
+
       if (stoppedThisRound || (await isOrderCancelled(order.id))) break;
 
       const successAfterRound = countLines(resultFile);
