@@ -368,24 +368,31 @@ async function sendDocument(chatId, filePath, caption) {
 
 async function upsertUser(from) {
   const id = String(from.id);
-  const users = await usersStore.update((users) => {
-    if (!users[id]) {
-      users[id] = {
-        telegramId: id,
-        username: from.username || "",
-        firstName: from.first_name || "",
-        totalKait: 0,
-        totalSpend: 0,
-        region: "UK",
-        createdAt: new Date().toISOString(),
-      };
-    } else {
-      users[id].username = from.username || users[id].username;
-      users[id].firstName = from.first_name || users[id].firstName;
+  // Baca 1 user saja (ringan), bukan seluruh dokumen users.
+  const existing = await usersStore.readOne(id);
+  if (existing) {
+    const newUsername = from.username || existing.username;
+    const newFirst = from.first_name || existing.firstName;
+    // Tulis HANYA kalau ada perubahan -> hindari write dokumen tiap pesan (sumber delay).
+    if (newUsername !== existing.username || newFirst !== existing.firstName) {
+      existing.username = newUsername;
+      existing.firstName = newFirst;
+      await usersStore.setOne(id, existing);
     }
-    return users;
-  });
-  return users[id];
+    return existing;
+  }
+  // User baru -> buat (tulis 1 key saja).
+  const created = {
+    telegramId: id,
+    username: from.username || "",
+    firstName: from.first_name || "",
+    totalKait: 0,
+    totalSpend: 0,
+    region: "UK",
+    createdAt: new Date().toISOString(),
+  };
+  await usersStore.setOne(id, created);
+  return created;
 }
 
 let _botStatsCache = null;
@@ -421,27 +428,27 @@ async function showHome(chatId, from) {
   const line = "━━━━━━━━━━━━━━━";
 
   const homeText = [
-    `👋 Halo, <b>${user.firstName || "User"}</b>!`,
-    "Selamat datang di <b>Premkuy Store</b> 🎉",
+    `Halo, <b>${user.firstName || "User"}</b>!`,
+    "Selamat datang di <b>Premkuy Store</b>",
     "",
     line,
-    "👤 <b>Akun Kamu</b>",
-    `🆔 ID: <code>${user.telegramId}</code>`,
-    `🏷️ Username: ${username}`,
-    `🔗 Total Kait: <b>${fmt(user.totalKait)}</b>`,
-    `🎁 Credit: <b>${fmt(user.credit)}</b> akun`,
-    `💸 Pengeluaran: <b>${formatRupiah(user.totalSpend || 0)}</b>`,
+    "<b>Akun Kamu</b>",
+    `ID: <code>${user.telegramId}</code>`,
+    `Username: ${username}`,
+    `Total Kait: <b>${fmt(user.totalKait)}</b>`,
+    `Credit: <b>${fmt(user.credit)}</b> akun`,
+    `Pengeluaran: <b>${formatRupiah(user.totalSpend || 0)}</b>`,
     "",
     line,
-    "📊 <b>Info Bot</b>",
-    `🌐 Total Terkait: <b>${fmt(stats.totalKait)}</b>`,
-    `🏆 Milestone: <b>${fmt(milestoneStep)}</b> terkait (bonus +${milestonePer} credit)`,
-    `📈 Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
+    "<b>Info Bot</b>",
+    `Total Terkait: <b>${fmt(stats.totalKait)}</b>`,
+    `Milestone: <b>${fmt(milestoneStep)}</b> terkait (bonus +${milestonePer} credit)`,
+    `Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
     `<code>${miniBar(userKait % milestoneStep, milestoneStep)}</code>`,
-    `   kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
+    `kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
     "",
     line,
-    `🆘 Support: ${formatTelegramSupport(settings.support)}`,
+    `Support: ${formatTelegramSupport(settings.support)}`,
   ].join("\n");
 
   if (fs.existsSync(START_LOGO_PATH)) {
