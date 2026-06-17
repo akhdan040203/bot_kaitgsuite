@@ -621,9 +621,9 @@ async function processOrder(order) {
         `Total: ${order.totalAccounts}`,
         `Berhasil: ${successCount}`,
         notRegisteredCount ? `Gsuite tidak terdaftar: ${notRegisteredCount}` : "",
-        `Gagal/belum berhasil: ${remainingCount}`,
+        `Tidak bisa diproses: ${remainingCount}`,
         refundCredit
-          ? `\n🎁 ${remainingCount} akun gagal → +${refundCredit} credit ngait (bisa dipakai gratis untuk order berikutnya).`
+          ? `\n🎁 ${remainingCount} gsuite gagal → +${refundCredit} credit ngait (bisa dipakai gratis untuk order berikutnya).`
           : "",
       ].filter(Boolean).join("\n")
     );
@@ -631,13 +631,23 @@ async function processOrder(order) {
       await sendDocument(notifyId, resultFile, `Hasil akun berhasil ngait order #${order.id}`);
     }
     if (notRegisteredCount > 0) {
-      await sendDocument(notifyId, notRegisteredFile, `Gsuite tidak terdaftar order #${order.id}`);
+      await sendDocument(notifyId, notRegisteredFile, `⚠️ Gsuite tidak terdaftar/tidak didukung order #${order.id} — ${notRegisteredCount} akun`);
     }
     if (remainingCount > 0) {
-      await sendDocument(notifyId, remainingUnverifiedFile, `Sisa akun gagal/belum berhasil order #${order.id}`);
+      // Akun yang setelah semua percobaan tetap gagal (mis. Authentication Error berulang)
+      // = kemungkinan TIDAK DIDUKUNG / akun bermasalah. Kirim ke buyer + sudah di-refund credit.
+      await sendDocument(
+        notifyId,
+        remainingUnverifiedFile,
+        `❌ Gsuite TIDAK BISA diproses (kemungkinan tidak didukung/akun bermasalah) order #${order.id} — ${remainingCount} akun`
+      );
       await notify(
         notifyId,
-        `🔁 Mau ngait ulang <b>${remainingCount} akun gagal</b> pakai saldo kamu?`,
+        [
+          `⚠️ <b>${remainingCount} gsuite tidak bisa diproses</b> (sudah dicoba beberapa kali, gagal terus — kemungkinan tidak didukung/akun bermasalah).`,
+          refundCredit ? `Tenang, ${refundCredit} akun gagal sudah dikembalikan jadi credit. 🎁` : "",
+          "Kamu bisa coba ngait ulang (pakai credit/saldo) atau ganti akun gsuite lain.",
+        ].filter(Boolean).join("\n"),
         { inline_keyboard: [[{ text: `🔁 Retry ${remainingCount} akun (pakai saldo)`, callback_data: `retry_${order.id}` }]] }
       );
     }
