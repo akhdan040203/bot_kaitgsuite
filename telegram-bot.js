@@ -1339,6 +1339,7 @@ async function handleAdminCommand(chatId, text) {
         "/orders",
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
+        "/sisa ORDER_ID  (ambil file akun yang belum berhasil/diproses)",
         "/buyer ORDER_ID @username  (arahkan progres+hasil order ke buyer)",
         "/progres ORDER_ID PERSEN  (update bar progres ke customer)",
         "/kirimhasil ORDER_ID  (kirim file .txt + caption -> hasil ke customer)",
@@ -1675,6 +1676,52 @@ async function handleAdminCommand(chatId, text) {
     const paused = command === "/pause";
     await settingsStore.update((settings) => ({ ...settings, paused }));
     await sendMessage(chatId, paused ? "Bot dipause." : "Bot aktif kembali.");
+    return true;
+  }
+
+  if (command === "/sisa") {
+    const orderId = String(args[0] || "").replace(/^#+/, "").trim();
+    if (!orderId) {
+      await sendMessage(chatId, "Format: /sisa ORDER_ID\n(Ambil daftar akun gsuite yang BELUM berhasil/diproses dari sebuah order.)");
+      return true;
+    }
+    const orders = await ordersStore.read();
+    const order = orders.find((o) => String(o.id) === String(orderId));
+    if (!order || !order.orderPath) {
+      await sendMessage(chatId, `Order #${orderId} tidak ditemukan / tidak ada file-nya.`);
+      return true;
+    }
+    const dir = order.orderPath;
+    const rd = (f) => {
+      try {
+        return fs.readFileSync(path.join(dir, f), "utf8").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      } catch (_) {
+        return [];
+      }
+    };
+    let orig = rd("original-input.txt");
+    if (!orig.length) orig = rd("input.txt");
+    const okSet = new Set(rd("success.txt").map((x) => x.split("|")[0].trim().toLowerCase()));
+    const nrSet = new Set(rd("not-registered.txt").map((x) => x.split("|")[0].trim().toLowerCase()));
+    const sisa = orig.filter((x) => {
+      const e = x.split("|")[0].trim().toLowerCase();
+      return !okSet.has(e) && !nrSet.has(e);
+    });
+    if (!orig.length) {
+      await sendMessage(chatId, `Order #${orderId}: file akun tidak ditemukan di ${dir}.`);
+      return true;
+    }
+    if (!sisa.length) {
+      await sendMessage(chatId, `Order #${orderId}: tidak ada akun sisa (semua sudah berhasil/diproses).`);
+      return true;
+    }
+    const sisaPath = path.join(dir, "sisa.txt");
+    try {
+      fs.writeFileSync(sisaPath, sisa.join("\n"));
+      await sendDocument(chatId, sisaPath, `📄 Akun sisa order #${orderId} — ${sisa.length} akun (total ${orig.length}, sukses ${okSet.size})`);
+    } catch (e) {
+      await sendMessage(chatId, `Gagal buat/kirim file sisa: ${e.message}`);
+    }
     return true;
   }
 

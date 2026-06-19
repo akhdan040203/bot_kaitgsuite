@@ -1842,7 +1842,12 @@ def fast_process_emulator(automator):
     processed_count = 0
     success_count = 0
     consecutive_fail = 0  # gagal beruntun (untuk circuit breaker)
-    any_success = False
+    # Seed any_success dari success.txt: kalau RONDE SEBELUMNYA sudah ada yang sukses,
+    # JANGAN abort (breaker hanya untuk kasus "dari awal gagal semua, belum pernah sukses").
+    try:
+        any_success = os.path.exists(RESULT_FILE) and os.path.getsize(RESULT_FILE) > 0
+    except Exception:
+        any_success = False
     abort_after = int(os.getenv("PSC_ABORT_AFTER_FAILS", "50"))  # 0 = matikan breaker
 
     while True:
