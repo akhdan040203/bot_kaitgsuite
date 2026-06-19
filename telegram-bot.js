@@ -1192,6 +1192,30 @@ async function markOrderPaid(orderId) {
       console.error(`[payment] failed to delete QRIS message #${orderId}: ${error.message}`);
     }
   }
+
+  // Notif PEMBAYARAN BERHASIL -> ke USER (buyer) & ADMIN (sebelumnya cuma notif "menunggu pembayaran").
+  const notifyId = order.notifyTo || order.telegramId;
+  await sendMessage(
+    notifyId,
+    [
+      "✅ <b>Pembayaran berhasil!</b>",
+      "",
+      `🆔 Order: <code>${orderId}</code>`,
+      `📧 Jumlah akun: <b>${order.totalAccounts || 0}</b>`,
+      "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses.",
+      "Pantau progresnya ya. 🙏",
+    ].join("\n")
+  ).catch(() => {});
+  await notifyAdmins(
+    [
+      `✅ <b>Order #${orderId} LUNAS (dibayar)</b>`,
+      `👤 ${order.username ? "@" + order.username : order.telegramId}`,
+      `📧 ${order.totalAccounts || 0} akun • 💰 ${formatRupiah(order.totalPrice || 0)}`,
+      "📋 Masuk antrian.",
+    ].join("\n"),
+    String(order.telegramId)
+  ).catch(() => {});
+
   return updatedOrder;
 }
 
@@ -1641,6 +1665,21 @@ async function handleAdminCommand(chatId, text) {
     );
     await consumeOrderBenefits(orderId);
     await sendMessage(chatId, `Order #${orderId} ditandai paid dan masuk antrian.`);
+    // Notif ke user (buyer) juga.
+    const paidOrder = (await ordersStore.read()).find((o) => String(o.id) === String(orderId));
+    if (paidOrder) {
+      const notifyId = paidOrder.notifyTo || paidOrder.telegramId;
+      await sendMessage(
+        notifyId,
+        [
+          "✅ <b>Pembayaran berhasil!</b>",
+          "",
+          `🆔 Order: <code>${orderId}</code>`,
+          `📧 Jumlah akun: <b>${paidOrder.totalAccounts || 0}</b>`,
+          "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses. 🙏",
+        ].join("\n")
+      ).catch(() => {});
+    }
     return true;
   }
 
