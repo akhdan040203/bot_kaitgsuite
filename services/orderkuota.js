@@ -155,7 +155,50 @@ async function getOrkutMutasi() {
   return mutasiCache;
 }
 
+// ===== Integrasi api-orkut-gateway (aktif kalau ORKUT_GATEWAY_URL di-set) =====
+function gatewayBaseUrl() {
+  return String(process.env.ORKUT_GATEWAY_URL || "").replace(/\/+$/, "");
+}
+
+async function createViaGateway({ amount }) {
+  const base = gatewayBaseUrl();
+  const key = process.env.ORKUT_GATEWAY_API_KEY || "";
+  const headers = { "Content-Type": "application/json" };
+  if (key) headers["X-API-KEY"] = key;
+  const resp = await axios.post(
+    `${base}/api/transactions`,
+    { amount: Number(amount) },
+    { headers, timeout: 30000, validateStatus: () => true }
+  );
+  const data = resp.data || {};
+  // 202 = WAITING (downtime harian / pool fee penuh) -> minta retry.
+  if (resp.status === 202 || data.state === "WAITING") {
+    const err = new Error(data.message || "Payment gateway sedang sibuk/maintenance, coba lagi sebentar.");
+    err.code = "GATEWAY_WAITING";
+    err.retryAfterMs = Number(data.retry_after_ms) || 2000;
+    throw err;
+  }
+  if (resp.status !== 200 || !data.status || !data.data) {
+    throw new Error(data.message || `Gateway error (HTTP ${resp.status})`);
+  }
+  const t = data.data;
+  return {
+    provider: "orkut-gateway",
+    reference: t.id, // TRX-xxxx -> kunci cek status
+    amount: t.amount, // base + fee (total yang dibayar user)
+    fee: t.fee,
+    qrText: t.qr_string,
+    qrImage: t.qr_image,
+    raw: t,
+  };
+}
+
 async function createQrisInvoice({ orderId, amount }) {
+  // Pakai gateway kalau di-set (cara baru, cek pembayaran by-ID).
+  if (gatewayBaseUrl()) {
+    return createViaGateway({ amount });
+  }
+
   const url = process.env.ORDERKUOTA_CREATE_URL;
   const token = process.env.ORDERKUOTA_API_TOKEN || process.env.APIKEY_ORKUT || process.env.ORKUT_KEY || process.env.AUTH_TOKEN;
   const legacyQrisText =
@@ -207,6 +250,22 @@ async function createQrisInvoice({ orderId, amount }) {
 }
 
 async function checkPaymentStatus(payment) {
+  // Order yang dibuat lewat gateway -> cek by TRX-id (GET, tanpa API key).
+  if (payment && payment.provider === "orkut-gateway") {
+    const base = gatewayBaseUrl();
+    if (!base || !payment.reference) return "PENDING";
+    const resp = await axios.get(
+      `${base}/api/transactions/${encodeURIComponent(payment.reference)}`,
+      { timeout: 30000, validateStatus: () => true }
+    );
+    const data = resp.data || {};
+    if (resp.status !== 200 || !data.data) return "PENDING";
+    const st = String(data.data.status || "").toUpperCase();
+    if (st === "PAID") return "PAID";
+    if (st === "EXPIRED" || st === "CANCELLED") return "EXPIRED";
+    return "PENDING";
+  }
+
   const url = process.env.ORDERKUOTA_STATUS_URL;
   const token = process.env.ORDERKUOTA_API_TOKEN || process.env.APIKEY_ORKUT || process.env.ORKUT_KEY || process.env.AUTH_TOKEN;
 

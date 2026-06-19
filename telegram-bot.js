@@ -641,8 +641,11 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
 
   const now = new Date().toISOString();
   const isFree = pricing.afterDiscount <= 0;
-  const uniqueCode = isFree ? 0 : getUniquePaymentCode(orderId, settings);
-  const totalPrice = pricing.afterDiscount + uniqueCode;
+  // Gateway aktif kalau ORKUT_GATEWAY_URL di-set. Cara lama: kode unik buatan bot.
+  // Gateway: fee + total ditentukan gateway (di-set ulang setelah invoice).
+  const useGateway = !isFree && !!process.env.ORKUT_GATEWAY_URL;
+  let uniqueCode = isFree || useGateway ? 0 : getUniquePaymentCode(orderId, settings);
+  let totalPrice = pricing.afterDiscount + uniqueCode;
 
   const baseOrder = {
     id: orderId,
@@ -710,13 +713,26 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   // ===== Order berbayar (QRIS) =====
   let invoice;
   try {
-    invoice = await createQrisInvoice({ orderId, amount: totalPrice });
+    if (useGateway) {
+      // Gateway nentuin fee + total. Kirim base amount (afterDiscount), pakai amount balikan.
+      invoice = await createQrisInvoice({ orderId, amount: pricing.afterDiscount });
+      totalPrice = Number(invoice.amount) || pricing.afterDiscount;
+      uniqueCode = Number(invoice.fee) || 0;
+    } else {
+      invoice = await createQrisInvoice({ orderId, amount: totalPrice });
+    }
   } catch (error) {
+    if (error.code === "GATEWAY_WAITING") {
+      await sendMessage(chatId, `⏳ ${error.message}\nSilakan coba lagi beberapa saat (mungkin lagi sibuk/maintenance).`);
+      return;
+    }
     await sendMessage(chatId, `Gagal membuat QRIS: ${error.message}`);
     return;
   }
   const order = {
     ...baseOrder,
+    uniqueCode,
+    totalPrice,
     status: "WAITING_PAYMENT",
     payment: { ...invoice, orderId, amount: totalPrice, status: "PENDING" },
   };
@@ -1340,6 +1356,9 @@ async function handleAdminCommand(chatId, text) {
         "/paid ORDER_ID",
         "/batalproses ORDER_ID",
         "/sisa ORDER_ID  (ambil file akun yang belum berhasil/diproses)",
+        "/dahulukan ORDER_ID  (jalankan duluan + pause yang sedang jalan)",
+        "/pauseorder ORDER_ID  (pause order yang sedang jalan)",
+        "/lanjutkan ORDER_ID  (lanjutkan order yang di-pause)",
         "/buyer ORDER_ID @username  (arahkan progres+hasil order ke buyer)",
         "/progres ORDER_ID PERSEN  (update bar progres ke customer)",
         "/kirimhasil ORDER_ID  (kirim file .txt + caption -> hasil ke customer)",
@@ -1677,6 +1696,68 @@ async function handleAdminCommand(chatId, text) {
     await settingsStore.update((settings) => ({ ...settings, paused }));
     await sendMessage(chatId, paused ? "Bot dipause." : "Bot aktif kembali.");
     return true;
+  }
+
+  if (command === "/pauseorder" || command === "/dahulukan" || command === "/prioritas" || command === "/lanjutkan" || command === "/resumeorder") {
+    const orderId = String(args[0] || "").replace(/^#+/, "").trim();
+    if (!orderId) {
+      await sendMessage(chatId, "Format: " + command + " ORDER_ID");
+      return true;
+    }
+    const orders = await ordersStore.read();
+    const order = orders.find((o) => String(o.id) === String(orderId));
+    if (!order) {
+      await sendMessage(chatId, `Order #${orderId} tidak ditemukan.`);
+      return true;
+    }
+    const num = Number(orderId);
+    const idv = [...new Set([orderId, String(orderId), ...(Number.isFinite(num) ? [num] : [])])];
+
+    // PAUSE: hentikan sementara order yang sedang RUNNING (progres disimpan).
+    if (command === "/pauseorder") {
+      if (order.status !== "RUNNING") {
+        await sendMessage(chatId, `Order #${orderId} tidak sedang jalan (status ${order.status}). Pause hanya untuk order RUNNING.`);
+        return true;
+      }
+      await ordersStore.patchItem("id", idv, { pauseRequested: true });
+      await sendMessage(chatId, `⏸️ Order #${orderId} akan di-pause (worker berhenti sebentar lagi, progres disimpan).\nLanjutkan nanti: /lanjutkan ${orderId}`);
+      return true;
+    }
+
+    // LANJUTKAN: order yang PAUSED -> QUEUED (lanjut dari progres terakhir).
+    if (command === "/lanjutkan" || command === "/resumeorder") {
+      if (order.status !== "PAUSED") {
+        await sendMessage(chatId, `Order #${orderId} tidak sedang di-pause (status ${order.status}).`);
+        return true;
+      }
+      await ordersStore.patchItem("id", idv, { status: "QUEUED", pauseRequested: false });
+      await sendMessage(chatId, `▶️ Order #${orderId} dilanjutkan (masuk antrian lagi, lanjut dari progres terakhir).`);
+      return true;
+    }
+
+    // DAHULUKAN: prioritaskan order ini + pause order yang sedang RUNNING (biar ini jalan duluan).
+    if (command === "/dahulukan" || command === "/prioritas") {
+      if (!["QUEUED", "PAID", "PAUSED"].includes(order.status)) {
+        await sendMessage(chatId, `Order #${orderId} status ${order.status} — cuma bisa dahulukan order yang antri/pause.`);
+        return true;
+      }
+      await ordersStore.patchItem("id", idv, { priority: Date.now(), status: order.status === "PAUSED" ? "QUEUED" : order.status });
+      const pausedRunning = [];
+      for (const o of orders) {
+        if (o.status === "RUNNING" && String(o.id) !== String(orderId)) {
+          const n2 = Number(o.id);
+          const idv2 = [...new Set([o.id, String(o.id), ...(Number.isFinite(n2) ? [n2] : [])])];
+          await ordersStore.patchItem("id", idv2, { pauseRequested: true });
+          pausedRunning.push(o.id);
+        }
+      }
+      await sendMessage(
+        chatId,
+        `✅ Order #${orderId} diprioritaskan (jalan duluan).` +
+          (pausedRunning.length ? `\n⏸️ Order yang sedang jalan di-pause: #${pausedRunning.join(", #")} (lanjut nanti: /lanjutkan).` : "")
+      );
+      return true;
+    }
   }
 
   if (command === "/sisa") {
