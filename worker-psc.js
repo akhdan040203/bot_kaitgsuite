@@ -335,11 +335,18 @@ async function processOrder(order) {
   // (order.notifyTo di-set via /buyer), progres real-time worker dikirim ke BUYER, bukan admin.
   // (Kredit/totalKait tetap ke order.telegramId = pembayar.)
   const notifyId = order.notifyTo || order.telegramId;
-  const initialProgress = await notify(
-    notifyId,
-    renderProgress(order, "Menunggu worker", 0, order.totalAccounts, "Order mulai diproses.")
-  );
-  const progressMessageId = initialProgress?.message_id;
+  const startText = renderProgress(order, "Mulai diproses", 0, order.totalAccounts, "Order mulai diproses.");
+  let progressMessageId = null;
+  // Kalau ada pesan "Pembayaran berhasil" (progressMsgId) -> UBAH jadi bar progres,
+  // jadi 1 pesan yang berkembang (gak kirim pesan baru).
+  if (order.progressMsgId && String(order.progressChatId) === String(notifyId)) {
+    const edited = await editNotify(notifyId, order.progressMsgId, startText);
+    if (edited) progressMessageId = order.progressMsgId;
+  }
+  if (!progressMessageId) {
+    const initialProgress = await notify(notifyId, startText);
+    progressMessageId = initialProgress?.message_id;
+  }
 
   // Kirim file akun yang akan dikait ke admin saat mulai proses.
   // Saat resume, input.txt = akun SISA (bukan original), jadi caption disesuaikan.

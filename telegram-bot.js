@@ -1195,7 +1195,7 @@ async function markOrderPaid(orderId) {
 
   // Notif PEMBAYARAN BERHASIL -> ke USER (buyer) & ADMIN (sebelumnya cuma notif "menunggu pembayaran").
   const notifyId = order.notifyTo || order.telegramId;
-  await sendMessage(
+  const sentPaid = await sendMessage(
     notifyId,
     [
       "✅ <b>Pembayaran berhasil!</b>",
@@ -1205,7 +1205,13 @@ async function markOrderPaid(orderId) {
       "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses.",
       "Pantau progresnya ya. 🙏",
     ].join("\n")
-  ).catch(() => {});
+  ).catch(() => null);
+  // Simpan id pesan ini -> nanti worker UBAH pesan ini jadi bar "sedang diproses" (1 pesan berkembang).
+  if (sentPaid && sentPaid.message_id) {
+    await ordersStore
+      .patchItem("id", idValues, { progressMsgId: sentPaid.message_id, progressChatId: String(notifyId) })
+      .catch(() => {});
+  }
   await notifyAdmins(
     [
       `✅ <b>Order #${orderId} LUNAS (dibayar)</b>`,
