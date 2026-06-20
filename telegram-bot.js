@@ -2516,6 +2516,10 @@ async function main() {
   await connectMongo();
   log("MongoDB connected.");
 
+  // Warm-up: isi cache statistik + hangatkan koneksi DB SEBELUM terima pesan,
+  // biar /start pertama gak lambat (cache botStats kosong = baca seluruh orders).
+  await botStats().catch((e) => console.error(`[warmup] botStats: ${e.message}`));
+
   // Hapus webhook (kalau pernah ke-set) supaya getUpdates polling tidak bentrok -> hindari 409.
   try {
     await tg("deleteWebhook", { drop_pending_updates: false });
