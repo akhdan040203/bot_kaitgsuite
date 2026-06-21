@@ -138,18 +138,27 @@ async def check_account(playwright, email, password, semaphore, index, total):
             log_step(tid, "LOGIN", "Opening Google Sign-in...")
             await page.goto("https://accounts.google.com/signin", timeout=60000)
 
-            email_input = page.locator('input[type="email"]')
+            # Google UI baru di RDP memakai type="text", sedangkan UI lama memakai
+            # type="email". Gunakan selector gabungan seperti proses linker.
+            email_input = page.locator('input[type="email"], input[type="text"]').first
             await email_input.wait_for(state="visible", timeout=15000)
             await email_input.fill(email)
-            await page.locator('#identifierNext button').click()
+            email_next = page.locator(
+                '#identifierNext, button:has-text("Berikutnya"), button:has-text("Next")'
+            ).first
+            await email_next.wait_for(state="visible", timeout=10000)
+            await email_next.click()
             log_info(tid, "Email entered")
 
             # Wait for password step to fully load
-            await page.wait_for_selector('#passwordNext', state='visible', timeout=15000)
-            pass_input = page.locator('#password input[type="password"]')
-            await pass_input.wait_for(state="visible", timeout=10000)
+            pass_input = page.locator('input[type="password"]').first
+            await pass_input.wait_for(state="visible", timeout=30000)
             await pass_input.fill(password)
-            await page.locator('#passwordNext button').click()
+            password_next = page.locator(
+                '#passwordNext, button:has-text("Berikutnya"), button:has-text("Next")'
+            ).first
+            await password_next.wait_for(state="visible", timeout=10000)
+            await password_next.click()
             log_info(tid, "Password entered")
 
             # Wait for login to process
