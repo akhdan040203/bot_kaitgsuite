@@ -100,29 +100,37 @@ async def wait_for_element(page_or_frame, selector, state="visible", timeout=100
 
 async def click_gopay_continue(page, task_id):
     """Klik tombol persetujuan pada variasi UI Google Payments/RDP."""
-    label_re = re.compile(
-        r"^\s*(Lanjutkan(?:\s+ke\s+GoPay)?|Continue(?:\s+to\s+GoPay)?)\s*$",
-        re.IGNORECASE,
-    )
-    # Prioritaskan iframe dialog Google Payments, lalu coba frame lainnya sebagai fallback.
-    frames = list(page.frames)
-    frames.sort(key=lambda frame: 0 if frame.name == "hnyNZeIframe" else 1)
+    label_re = re.compile(r"Lanjutkan(?:\s+ke)?\s+GoPay|Continue(?:\s+to)?\s+GoPay", re.IGNORECASE)
     last_error = None
-    for frame in frames:
-        candidates = [
-            frame.get_by_role("button", name=label_re),
-            frame.locator('button, [role="button"]').filter(has_text=label_re),
-            frame.locator('div[role="button"].submit-button, button.submit-button'),
-        ]
-        for candidate in candidates:
-            try:
-                button = candidate.first
-                await button.wait_for(state="visible", timeout=5000)
-                await button.click()
-                log_info(task_id, "Clicked 'Lanjutkan ke GoPay'")
-                return
-            except Exception as exc:
-                last_error = exc
+    # Poll singkat agar tidak menunggu timeout berulang untuk setiap selector/frame.
+    for _ in range(30):
+        frames = list(page.frames)
+        frames.sort(key=lambda frame: 0 if frame.name == "hnyNZeIframe" else 1)
+        for frame in frames:
+            candidates = [
+                frame.get_by_text(label_re),
+                frame.get_by_role("button", name=label_re),
+                frame.locator('button, [role="button"]').filter(has_text=label_re),
+                frame.locator('div[role="button"].submit-button, button.submit-button'),
+            ]
+            for candidate in candidates:
+                try:
+                    if await candidate.count() == 0:
+                        continue
+                    button = candidate.first
+                    if not await button.is_visible():
+                        continue
+                    try:
+                        await button.click(force=True, timeout=3000)
+                    except Exception:
+                        # Beberapa versi Google menaruh teks pada child element; DOM click
+                        # tetap memicu handler pada parent lewat event bubbling.
+                        await button.evaluate("element => element.click()")
+                    log_info(task_id, "Clicked 'Lanjutkan ke GoPay'")
+                    return
+                except Exception as exc:
+                    last_error = exc
+        await asyncio.sleep(0.5)
     raise RuntimeError(f"Tombol 'Lanjutkan ke GoPay' tidak ditemukan: {last_error}")
 
 async def process_account(playwright, email, password, semaphore, otp_lock, index):
@@ -292,20 +300,20 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
                 try:
                     await click_gopay_continue(page, tid)
                     
-                    # Wait for new GoPay page/tab to open
-                    try:
-                        await context.wait_for_event("page", timeout=30000)
-                    except:
-                        await asyncio.sleep(3)  # Fallback if event missed
-                    
-                    # Find GoPay page from all pages in context
+                    # Cari tab GoPay dengan polling. Event popup bisa sudah terjadi tepat
+                    # saat click sehingga wait_for_event setelah click dapat terlewat.
                     gopay_page = None
-                    all_pages = context.pages
-                    for p in all_pages:
-                        page_url = p.url
-                        if "gopayapi.com" in page_url or "gopay" in page_url.lower():
-                            gopay_page = p
+                    all_pages = []
+                    for _ in range(60):
+                        all_pages = context.pages
+                        for p in all_pages:
+                            page_url = p.url
+                            if p != page and ("gopayapi.com" in page_url or "gopay" in page_url.lower()):
+                                gopay_page = p
+                                break
+                        if gopay_page is not None or len(all_pages) > 1:
                             break
+                        await asyncio.sleep(0.5)
                     
                     if gopay_page is None and len(all_pages) > 1:
                         gopay_page = all_pages[-1]
