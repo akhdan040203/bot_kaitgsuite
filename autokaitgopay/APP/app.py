@@ -102,16 +102,34 @@ async def click_gopay_continue(page, task_id):
     """Klik tombol persetujuan pada variasi UI Google Payments/RDP."""
     label_re = re.compile(r"Lanjutkan(?:\s+ke)?\s+GoPay|Continue(?:\s+to)?\s+GoPay", re.IGNORECASE)
     last_error = None
+
+    async def click_had_effect(button):
+        await asyncio.sleep(1)
+        try:
+            if not await button.is_visible():
+                return True
+        except Exception:
+            return True
+        try:
+            if len(page.context.pages) > 1:
+                return True
+        except Exception:
+            pass
+        return False
+
     # Poll singkat agar tidak menunggu timeout berulang untuk setiap selector/frame.
     for _ in range(30):
         frames = list(page.frames)
         frames.sort(key=lambda frame: 0 if frame.name == "hnyNZeIframe" else 1)
         for frame in frames:
+            text_match = frame.get_by_text(label_re)
             candidates = [
-                frame.get_by_text(label_re),
-                frame.get_by_role("button", name=label_re),
                 frame.locator('button, [role="button"]').filter(has_text=label_re),
+                frame.get_by_role("button", name=label_re),
                 frame.locator('div[role="button"].submit-button, button.submit-button'),
+                text_match.locator(
+                    'xpath=ancestor-or-self::*[self::button or @role="button"][1]'
+                ),
             ]
             for candidate in candidates:
                 try:
@@ -120,14 +138,43 @@ async def click_gopay_continue(page, task_id):
                     button = candidate.first
                     if not await button.is_visible():
                         continue
+                    # 1) Klik normal (user gesture paling mirip klik manual).
+                    try:
+                        await button.click(timeout=3000)
+                        if await click_had_effect(button):
+                            log_info(task_id, "Clicked 'Lanjutkan ke GoPay'")
+                            return
+                    except Exception as exc:
+                        last_error = exc
+                    # 2) Force click jika Playwright menganggap ada overlay.
                     try:
                         await button.click(force=True, timeout=3000)
-                    except Exception:
-                        # Beberapa versi Google menaruh teks pada child element; DOM click
-                        # tetap memicu handler pada parent lewat event bubbling.
+                        if await click_had_effect(button):
+                            log_info(task_id, "Clicked 'Lanjutkan ke GoPay' (force)")
+                            return
+                    except Exception as exc:
+                        last_error = exc
+                    # 3) Native DOM click pada elemen interaktif.
+                    try:
                         await button.evaluate("element => element.click()")
-                    log_info(task_id, "Clicked 'Lanjutkan ke GoPay'")
-                    return
+                        if await click_had_effect(button):
+                            log_info(task_id, "Clicked 'Lanjutkan ke GoPay' (DOM)")
+                            return
+                    except Exception as exc:
+                        last_error = exc
+                    # 4) Klik koordinat tengah tombol sebagai fallback terakhir di RDP.
+                    try:
+                        box = await button.bounding_box()
+                        if box:
+                            await page.mouse.click(
+                                box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2,
+                            )
+                            if await click_had_effect(button):
+                                log_info(task_id, "Clicked 'Lanjutkan ke GoPay' (mouse)")
+                                return
+                    except Exception as exc:
+                        last_error = exc
                 except Exception as exc:
                     last_error = exc
         await asyncio.sleep(0.5)
