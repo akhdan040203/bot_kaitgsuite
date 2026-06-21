@@ -2395,7 +2395,7 @@ async function handleCallback(query) {
         "Format lain seperti email:pass, email;pass, email pass akan otomatis di-convert.",
         "Hanya email GSuite/Google Workspace. Email gratis akan ditolak.",
         "Lebih dari 50 akun wajib kirim file .txt.",
-        service === "GOPAY" ? "Proses GoPay berjalan otomatis memakai 2 browser dan maksimal 3 batch." : "",
+        service === "GOPAY" ? "⚠️ <b>Note: Tidak Garansi, Jika terkena country detect.</b>" : "",
       ].filter(Boolean).join("\n"),
       { reply_markup: backButton() }
     );
