@@ -795,6 +795,8 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
         async with file_lock:
             credentials_list_global = await update_credentials_file(credentials_list_global, email, password, is_success=False)
     finally:
+        # Sinyal machine-readable untuk progress worker Node (satu kali per akun).
+        print(f"GOPAY_PROGRESS|LINK|{email}", flush=True)
         if context:
             await context.close()
         if browser:

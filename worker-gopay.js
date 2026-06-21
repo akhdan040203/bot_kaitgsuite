@@ -118,7 +118,7 @@ function killChildTree(child) {
   } catch (_) {}
 }
 
-function runPython(order, label, script, args, logFile, accountCount) {
+function runPython(order, label, script, args, logFile, accountCount, onProgress) {
   return new Promise((resolve, reject) => {
     const fullArgs = [script, ...args];
     if (String(process.env.GOPAY_HEADLESS || "false").toLowerCase() === "true") fullArgs.push("--headless");
@@ -133,6 +133,8 @@ function runPython(order, label, script, args, logFile, accountCount) {
     });
     let stopped = false;
     let settled = false;
+    let stdoutBuffer = "";
+    const progressedEmails = new Set();
     const finish = (callback) => {
       if (settled) return;
       settled = true;
@@ -155,6 +157,24 @@ function runPython(order, label, script, args, logFile, accountCount) {
     child.stdout.on("data", (chunk) => {
       fs.appendFileSync(logFile, chunk);
       process.stdout.write(chunk);
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        const match = line.trim().match(/^GOPAY_PROGRESS\|(LINK|CHECK)\|(.+)$/);
+        if (!match) continue;
+        const email = match[2].trim().toLowerCase();
+        if (!email || progressedEmails.has(email)) continue;
+        progressedEmails.add(email);
+        if (typeof onProgress === "function") {
+          Promise.resolve(onProgress({
+            stage: match[1],
+            email,
+            done: progressedEmails.size,
+            total: Math.max(1, Number(accountCount || 0)),
+          })).catch((error) => log(`progress update gagal: ${error.message}`));
+        }
+      }
     });
     child.stderr.on("data", (chunk) => {
       fs.appendFileSync(logFile, chunk);
@@ -177,6 +197,20 @@ function progressText(order, round, success, total, remaining, phase) {
     `<code>[${"#".repeat(filled)}${"-".repeat(10 - filled)}]</code> <b>${percent}%</b>`,
     `${success}/${total} gsuite terverifikasi`,
     `Batch ${round}/${MAX_BATCHES} • ${phase} • sisa ${remaining}`,
+  ].join("\n");
+}
+
+function activityProgressText(order, round, stage, done, stageTotal, verified, total, remaining) {
+  const safeStageTotal = Math.max(1, Number(stageTotal || 0));
+  const stageRatio = Math.min(1, Math.max(0, Number(done || 0) / safeStageTotal));
+  const percent = Math.floor((stage === "CHECK" ? 50 : 0) + stageRatio * 50);
+  const filled = Math.floor(percent / 10);
+  const label = stage === "CHECK" ? "checker" : "mengaitkan";
+  return [
+    `🌐 <b>GoPay Order #${order.id}</b>`,
+    `<code>[${"#".repeat(filled)}${"-".repeat(10 - filled)}]</code> <b>${percent}%</b>`,
+    `Batch ${round}/${MAX_BATCHES} • ${label}: ${done}/${stageTotal} akun`,
+    `Terverifikasi: ${verified}/${total} • sisa ${remaining}`,
   ].join("\n");
 }
 
@@ -254,7 +288,15 @@ async function processOrder(order) {
         "--success-file", linkedFile,
         "--failure-file", appFailureFile,
         "--browsers", String(BROWSERS),
-      ], logFile, remaining.length);
+      ], logFile, remaining.length, async (live) => {
+        const percent = Math.floor((live.done / Math.max(1, live.total)) * 50);
+        await updateOrder(order.id, { progressPercent: percent, phaseDone: live.done, phaseTotal: live.total });
+        await editNotify(
+          notifyId,
+          progressMessage?.message_id,
+          activityProgressText(order, round, "LINK", live.done, live.total, readLines(successFile).length, original.length, remaining.length)
+        );
+      });
       if (linked.stopped) {
         await finalizeCancelled(order, notifyId, original, successFile, failureFile);
         return;
@@ -269,7 +311,16 @@ async function processOrder(order) {
           "--checked-file", successFile,
           "--empty-file", emptyFile,
           "--browsers", String(BROWSERS),
-        ], logFile, candidates.length);
+        ], logFile, candidates.length, async (live) => {
+          const percent = 50 + Math.floor((live.done / Math.max(1, live.total)) * 50);
+          const verifiedNow = readLines(successFile).length;
+          await updateOrder(order.id, { progressPercent: percent, phaseDone: live.done, phaseTotal: live.total });
+          await editNotify(
+            notifyId,
+            progressMessage?.message_id,
+            activityProgressText(order, round, "CHECK", live.done, live.total, verifiedNow, original.length, remaining.length)
+          );
+        });
         if (checked.stopped) {
           await finalizeCancelled(order, notifyId, original, successFile, failureFile);
           return;

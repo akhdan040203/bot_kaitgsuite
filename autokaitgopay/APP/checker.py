@@ -218,6 +218,8 @@ async def check_account(playwright, email, password, semaphore, index, total):
         # Jangan save_result untuk error — biar tetap di GSUITETertautGoPay.txt
         log_progress()
     finally:
+        # Sinyal machine-readable agar progress checker tampil realtime di Telegram.
+        print(f"GOPAY_PROGRESS|CHECK|{email}", flush=True)
         if context:
             await context.close()
         if browser:
