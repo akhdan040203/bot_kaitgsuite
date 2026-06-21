@@ -197,6 +197,21 @@ async def complete_google_profile_if_needed(
     title_re = re.compile(r"Konfirmasikan informasi Anda|Confirm your information", re.IGNORECASE)
     input_re = re.compile(r"Nama lengkap|Full name", re.IGNORECASE)
     save_re = re.compile(r"Simpan dan lanjutkan|Save and continue", re.IGNORECASE)
+    profile_seen = False
+    last_error = None
+
+    async def profile_dialog_closed():
+        await asyncio.sleep(1)
+        for active_frame in list(page.frames):
+            try:
+                titles = active_frame.get_by_text(title_re)
+                for index in range(await titles.count()):
+                    if await titles.nth(index).is_visible():
+                        return False
+            except Exception:
+                continue
+        return True
+
     for _ in range(max(1, int(timeout_seconds * 2))):
         if stop_when_payment_methods_ready:
             try:
@@ -208,6 +223,7 @@ async def complete_google_profile_if_needed(
             try:
                 if await frame.get_by_text(title_re).count() == 0:
                     continue
+                profile_seen = True
                 input_candidates = [
                     frame.get_by_placeholder(input_re),
                     frame.get_by_label(input_re),
@@ -222,24 +238,61 @@ async def complete_google_profile_if_needed(
                     continue
                 full_name = full_name_from_email(email)
                 await name_input.fill(full_name)
+                # Trigger blur/change validation sebelum klik tombol submit.
+                await name_input.press("Tab")
+                await asyncio.sleep(0.5)
+                text_match = frame.get_by_text(save_re)
                 save_candidates = [
-                    frame.get_by_role("button", name=save_re),
-                    frame.get_by_text(save_re),
                     frame.locator('button, [role="button"]').filter(has_text=save_re),
+                    frame.get_by_role("button", name=save_re),
+                    text_match.locator(
+                        'xpath=ancestor-or-self::*[self::button or @role="button"][1]'
+                    ),
                 ]
                 for candidate in save_candidates:
                     if await candidate.count() == 0 or not await candidate.first.is_visible():
                         continue
+                    button = candidate.first
+                    # Klik normal terlebih dahulu agar event framework Google terpanggil.
                     try:
-                        await candidate.first.click(force=True, timeout=3000)
-                    except Exception:
-                        await candidate.first.evaluate("element => element.click()")
-                    log_info(task_id, f"Filled payment profile name and clicked 'Simpan dan lanjutkan'")
-                    await asyncio.sleep(2)
-                    return True
-            except Exception:
+                        await button.click(timeout=3000)
+                        if await profile_dialog_closed():
+                            log_info(task_id, "Filled profile and clicked 'Simpan dan lanjutkan'")
+                            return True
+                    except Exception as exc:
+                        last_error = exc
+                    try:
+                        await button.click(force=True, timeout=3000)
+                        if await profile_dialog_closed():
+                            log_info(task_id, "Filled profile and clicked 'Simpan dan lanjutkan' (force)")
+                            return True
+                    except Exception as exc:
+                        last_error = exc
+                    try:
+                        await button.evaluate("element => element.click()")
+                        if await profile_dialog_closed():
+                            log_info(task_id, "Filled profile and clicked 'Simpan dan lanjutkan' (DOM)")
+                            return True
+                    except Exception as exc:
+                        last_error = exc
+                    try:
+                        box = await button.bounding_box()
+                        if box:
+                            await page.mouse.click(
+                                box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2,
+                            )
+                            if await profile_dialog_closed():
+                                log_info(task_id, "Filled profile and clicked 'Simpan dan lanjutkan' (mouse)")
+                                return True
+                    except Exception as exc:
+                        last_error = exc
+            except Exception as exc:
+                last_error = exc
                 continue
         await asyncio.sleep(0.5)
+    if profile_seen:
+        raise RuntimeError(f"Dialog profil terlihat tetapi gagal disimpan: {last_error}")
     return False
 
 
