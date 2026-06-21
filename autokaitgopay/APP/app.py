@@ -195,6 +195,33 @@ async def complete_google_profile_if_needed(
         await asyncio.sleep(0.5)
     return False
 
+
+async def click_google_payment_save(page, task_id):
+    """Fallback untuk akun yang masih menampilkan tombol lama 'Simpan'."""
+    save_re = re.compile(r"^\s*(Simpan|Save)\s*$", re.IGNORECASE)
+    last_error = None
+    for _ in range(20):
+        for frame in list(page.frames):
+            candidates = [
+                frame.get_by_role("button", name=save_re),
+                frame.locator('button, [role="button"]').filter(has_text=save_re),
+                frame.locator('div[role="button"].submit-button, button.submit-button'),
+            ]
+            for candidate in candidates:
+                try:
+                    if await candidate.count() == 0 or not await candidate.first.is_visible():
+                        continue
+                    try:
+                        await candidate.first.click(force=True, timeout=3000)
+                    except Exception:
+                        await candidate.first.evaluate("element => element.click()")
+                    log_info(task_id, "Clicked 'Simpan'")
+                    return
+                except Exception as exc:
+                    last_error = exc
+        await asyncio.sleep(0.5)
+    raise RuntimeError(f"Tombol 'Simpan' tidak ditemukan: {last_error}")
+
 async def process_account(playwright, email, password, semaphore, otp_lock, index):
     global credentials_list_global
     browser = None
@@ -598,14 +625,15 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
                               # Wait for GoPay popup to close
                               await page.wait_for_selector('iframe[name="hnyNZeIframe"]', state="attached", timeout=30000)
                               
-                              # === CLICK "Simpan" ===
-                              log_step(tid, "SAVE", "Clicking 'Simpan'...")
+                              # Sesudah PIN, sebagian akun meminta Nama lengkap dan tombol
+                              # "Simpan dan lanjutkan"; akun lama langsung menampilkan "Simpan".
+                              log_step(tid, "SAVE", "Completing Google payment profile...")
                               try:
-                                  iframe = page.frame_locator('iframe[name="hnyNZeIframe"]')
-                                  simpan_button = iframe.locator('div[role="button"].submit-button')
-                                  await simpan_button.wait_for(state="visible", timeout=20000)
-                                  await simpan_button.click()
-                                  log_info(tid, "Clicked 'Simpan'")
+                                  profile_completed = await complete_google_profile_if_needed(
+                                      page, email, tid, timeout_seconds=15
+                                  )
+                                  if not profile_completed:
+                                      await click_google_payment_save(page, tid)
                                   
                                   # Verify: wait for GoPay element to appear after section reload
                                   try:
