@@ -61,7 +61,10 @@ async def update_credentials_file(credentials_list, processed_email, password, i
         raise
     return credentials_list
 
-def read_credentials(file_path=CREDENTIALS_FILE):
+def read_credentials(file_path=None):
+    # Default argument Python dievaluasi saat fungsi dibuat. Resolve di runtime agar
+    # path dari --input-file milik order benar-benar digunakan.
+    file_path = file_path or CREDENTIALS_FILE
     credentials = []
     if not os.path.exists(file_path):
         log_fail("SYS", f"Gsuite.txt not found at {file_path}")
@@ -644,6 +647,8 @@ async def main():
 
     credentials_list = read_credentials()
     if not credentials_list:
+        if args.browsers is not None:
+            raise RuntimeError(f"No valid GSuite accounts in {CREDENTIALS_FILE}")
         return
 
     if not GOPAY_PHONE:

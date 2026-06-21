@@ -46,7 +46,9 @@ def load_already_checked():
                 pass
     return already
 
-def read_accounts(file_path=INPUT_FILE):
+def read_accounts(file_path=None):
+    # Resolve sesudah argumen CLI dipasang supaya tidak kembali ke file global lama.
+    file_path = file_path or INPUT_FILE
     accounts = []
     if not os.path.exists(file_path):
         log_fail("SYS", f"File not found: {file_path}")
@@ -236,6 +238,8 @@ async def main():
     
     accounts = read_accounts()
     if not accounts:
+        if args.browsers is not None:
+            raise RuntimeError(f"No valid GSuite accounts in {INPUT_FILE}")
         return
 
     # Anti-duplikat: load emails yang sudah dicek sebelumnya
