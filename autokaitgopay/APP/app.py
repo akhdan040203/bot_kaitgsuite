@@ -133,6 +133,68 @@ async def click_gopay_continue(page, task_id):
         await asyncio.sleep(0.5)
     raise RuntimeError(f"Tombol 'Lanjutkan ke GoPay' tidak ditemukan: {last_error}")
 
+
+def full_name_from_email(email):
+    local_part = str(email or "").split("@", 1)[0]
+    words = [word for word in re.split(r"[._+\-\d]+", local_part) if word]
+    if not words:
+        return "Google User"
+    name = " ".join(word.capitalize() for word in words)
+    return name if len(words) > 1 else f"{name} User"
+
+
+async def complete_google_profile_if_needed(
+    page, email, task_id, timeout_seconds=8, stop_when_payment_methods_ready=False
+):
+    """Isi dialog 'Konfirmasikan informasi Anda' jika akun belum punya nama pembayaran."""
+    title_re = re.compile(r"Konfirmasikan informasi Anda|Confirm your information", re.IGNORECASE)
+    input_re = re.compile(r"Nama lengkap|Full name", re.IGNORECASE)
+    save_re = re.compile(r"Simpan dan lanjutkan|Save and continue", re.IGNORECASE)
+    for _ in range(max(1, int(timeout_seconds * 2))):
+        if stop_when_payment_methods_ready:
+            try:
+                if await page.locator("div.HgYqic").count() > 0:
+                    return False
+            except Exception:
+                pass
+        for frame in list(page.frames):
+            try:
+                if await frame.get_by_text(title_re).count() == 0:
+                    continue
+                input_candidates = [
+                    frame.get_by_placeholder(input_re),
+                    frame.get_by_label(input_re),
+                    frame.locator('input[type="text"]'),
+                ]
+                name_input = None
+                for candidate in input_candidates:
+                    if await candidate.count() and await candidate.first.is_visible():
+                        name_input = candidate.first
+                        break
+                if name_input is None:
+                    continue
+                full_name = full_name_from_email(email)
+                await name_input.fill(full_name)
+                save_candidates = [
+                    frame.get_by_role("button", name=save_re),
+                    frame.get_by_text(save_re),
+                    frame.locator('button, [role="button"]').filter(has_text=save_re),
+                ]
+                for candidate in save_candidates:
+                    if await candidate.count() == 0 or not await candidate.first.is_visible():
+                        continue
+                    try:
+                        await candidate.first.click(force=True, timeout=3000)
+                    except Exception:
+                        await candidate.first.evaluate("element => element.click()")
+                    log_info(task_id, f"Filled payment profile name and clicked 'Simpan dan lanjutkan'")
+                    await asyncio.sleep(2)
+                    return True
+            except Exception:
+                continue
+        await asyncio.sleep(0.5)
+    return False
+
 async def process_account(playwright, email, password, semaphore, otp_lock, index):
     global credentials_list_global
     browser = None
@@ -247,6 +309,9 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
             log_step(tid, "PAYMENT", "Checking payment methods...")
             await page.goto("https://play.google.com/store/paymentmethods?hl=id", timeout=60000)
             await page.wait_for_load_state("domcontentloaded")
+            await complete_google_profile_if_needed(
+                page, email, tid, stop_when_payment_methods_ready=True
+            )
 
             # Race: check for existing GoPay OR "Tambahkan GoPay" button
             existing_gopay = page.locator('div.HgYqic').filter(has_text=re.compile(r'GoPay:'))
@@ -299,6 +364,7 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
                 # Klik variasi tombol: "Lanjutkan", "Lanjutkan ke GoPay", atau English UI.
                 try:
                     await click_gopay_continue(page, tid)
+                    await complete_google_profile_if_needed(page, email, tid, timeout_seconds=5)
                     
                     # Cari tab GoPay dengan polling. Event popup bisa sudah terjadi tepat
                     # saat click sehingga wait_for_event setelah click dapat terlewat.
