@@ -97,6 +97,34 @@ async def wait_for_element(page_or_frame, selector, state="visible", timeout=100
         log_fail("SYS", f"Timeout waiting for {selector}")
         raise
 
+
+async def click_gopay_continue(page, task_id):
+    """Klik tombol persetujuan pada variasi UI Google Payments/RDP."""
+    label_re = re.compile(
+        r"^\s*(Lanjutkan(?:\s+ke\s+GoPay)?|Continue(?:\s+to\s+GoPay)?)\s*$",
+        re.IGNORECASE,
+    )
+    # Prioritaskan iframe dialog Google Payments, lalu coba frame lainnya sebagai fallback.
+    frames = list(page.frames)
+    frames.sort(key=lambda frame: 0 if frame.name == "hnyNZeIframe" else 1)
+    last_error = None
+    for frame in frames:
+        candidates = [
+            frame.get_by_role("button", name=label_re),
+            frame.locator('button, [role="button"]').filter(has_text=label_re),
+            frame.locator('div[role="button"].submit-button, button.submit-button'),
+        ]
+        for candidate in candidates:
+            try:
+                button = candidate.first
+                await button.wait_for(state="visible", timeout=5000)
+                await button.click()
+                log_info(task_id, "Clicked 'Lanjutkan ke GoPay'")
+                return
+            except Exception as exc:
+                last_error = exc
+    raise RuntimeError(f"Tombol 'Lanjutkan ke GoPay' tidak ditemukan: {last_error}")
+
 async def process_account(playwright, email, password, semaphore, otp_lock, index):
     global credentials_list_global
     browser = None
@@ -260,14 +288,9 @@ async def process_account(playwright, email, password, semaphore, otp_lock, inde
                 # Wait for iframe to appear
                 await page.wait_for_selector('iframe[name="hnyNZeIframe"]', state="attached", timeout=15000)
 
-                # Click "Lanjutkan" button inside the iframe
+                # Klik variasi tombol: "Lanjutkan", "Lanjutkan ke GoPay", atau English UI.
                 try:
-                    iframe = page.frame_locator('iframe[name="hnyNZeIframe"]')
-                    lanjutkan_button = iframe.locator('div[role="button"].submit-button')
-                    await lanjutkan_button.wait_for(state="visible", timeout=15000)
-                    
-                    await lanjutkan_button.click()
-                    log_info(tid, "Clicked 'Lanjutkan' in iframe")
+                    await click_gopay_continue(page, tid)
                     
                     # Wait for new GoPay page/tab to open
                     try:
