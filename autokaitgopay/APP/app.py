@@ -1,10 +1,19 @@
 import re
 import os
+import sys
 import argparse
 import requests
 import asyncio
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError, Page
+
+# Terminal Windows/RDP sering memakai cp1252. Logger aplikasi berisi simbol Unicode,
+# jadi paksa stream UTF-8 sebelum Colorama membungkus stdout/stderr.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from logger import (
     C, progress, ProgressTracker,
     log_info, log_success, log_fail, log_warn, log_step, log_otp, log_lock, log_unlock,

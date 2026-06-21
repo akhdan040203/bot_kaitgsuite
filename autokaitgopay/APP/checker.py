@@ -1,8 +1,16 @@
 import re
 import os
+import sys
 import argparse
 import asyncio
 from playwright.async_api import async_playwright, TimeoutError
+
+# Hindari UnicodeEncodeError pada terminal Windows/RDP dengan code page cp1252.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from logger import (
     C, progress, ProgressTracker,
     log_info, log_success, log_fail, log_warn, log_step, log_progress,

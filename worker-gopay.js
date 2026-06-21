@@ -127,7 +127,9 @@ function runPython(order, label, script, args, logFile, accountCount) {
     const child = spawn(PYTHON_BIN, fullArgs, {
       cwd: GOPAY_DIR,
       windowsHide: true,
-      env: { ...process.env },
+      // Paksa UTF-8 di Windows/RDP agar logger Python yang berisi emoji tidak crash
+      // dengan UnicodeEncodeError dari code page cp1252.
+      env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
     });
     let stopped = false;
     let settled = false;
