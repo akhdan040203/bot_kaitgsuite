@@ -182,9 +182,21 @@ function formatTelegramSupport(value) {
   return `<a href="https://t.me/${username}">@${username}</a>`;
 }
 
+function orderService(order) {
+  return String((order && order.service) || "PSC").toUpperCase() === "GOPAY" ? "GOPAY" : "PSC";
+}
+
+function serviceLabel(service) {
+  return String(service || "PSC").toUpperCase() === "GOPAY" ? "GoPay" : "PSC";
+}
+
 function getQueueInfo(orderId, allOrders) {
   const orders = allOrders || [];
-  const activeOrders = orders.filter((order) => ["RUNNING", "QUEUED"].includes(order.status));
+  const target = orders.find((order) => String(order.id) === String(orderId));
+  const service = orderService(target);
+  const activeOrders = orders.filter(
+    (order) => orderService(order) === service && ["RUNNING", "QUEUED"].includes(order.status)
+  );
   const index = activeOrders.findIndex((order) => String(order.id) === String(orderId));
   if (index === -1) return null;
 
@@ -213,6 +225,7 @@ function mainKeyboard() {
   return {
     inline_keyboard: [
       [{ text: "🛒 Kait PSC — Order Sekarang", callback_data: "kait_psc" }],
+      [{ text: "🌐 Kait GoPay — Order Sekarang", callback_data: "kait_gopay" }],
       [
         { text: "📋 Antrian", callback_data: "queue" },
         { text: "🌍 Region", callback_data: "region_menu" },
@@ -527,9 +540,10 @@ function adminRegionKeyboard(settings) {
 function kaitDraftKeyboard(session, opts = {}) {
   const credit = Math.max(0, Number(opts.credit || 0));
   const accounts = Math.max(0, Number(opts.accounts || 0));
-  const rows = [
-    [{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }],
-  ];
+  const rows = [];
+  if (String((session && session.service) || "PSC").toUpperCase() !== "GOPAY") {
+    rows.push([{ text: `🌍 Region: ${regionLabel(session && session.region)}`, callback_data: "toggle_region" }]);
+  }
   if (accounts > 0 && credit >= accounts) {
     // Credit cukup -> PILIHAN: bayar pakai credit (gratis) ATAU QRIS penuh (simpan credit).
     rows.push([{ text: `💳 Bayar pakai Credit (${accounts} akun • GRATIS)`, callback_data: "pay_credit" }]);
@@ -557,12 +571,13 @@ function draftKeyboardOpts(user, parsed) {
   };
 }
 
-function buildOrderSummary(parsed, settings, user, voucher, region) {
+function buildOrderSummary(parsed, settings, user, voucher, region, service = "PSC") {
   const p = computeOrderPricing(parsed.valid.length, settings, user, voucher);
+  const isGopay = String(service).toUpperCase() === "GOPAY";
   const lines = [
-    "<b>Order Kait PSC</b>",
+    `<b>Order Kait ${isGopay ? "GoPay" : "PSC"}</b>`,
     "",
-    `🌍 Region: <b>${regionLabel(region)}</b>`,
+    isGopay ? "🌐 Proses: Browser (2 paralel)" : `🌍 Region: <b>${regionLabel(region)}</b>`,
     `Total input: ${parsed.totalInput}`,
     `Valid Gsuite: ${parsed.valid.length}`,
     `Invalid: ${parsed.invalid.length}`,
@@ -589,7 +604,7 @@ function getUniquePaymentCode(orderId, settings) {
   return safeMin + (Number(orderId) % range);
 }
 
-async function handleParsedKait(chatId, parsed, voucher) {
+async function handleParsedKait(chatId, parsed, voucher, service = "PSC") {
   const settings = await settingsStore.read();
   if (settings.paused) {
     await sendMessage(chatId, "Bot sedang pause. Coba lagi nanti.");
@@ -605,9 +620,10 @@ async function handleParsedKait(chatId, parsed, voucher) {
   const user = users[String(chatId)];
 
   const defaultRegion = normalizeRegion(user && user.region, settings);
-  const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion };
+  const normalizedService = String(service).toUpperCase() === "GOPAY" ? "GOPAY" : "PSC";
+  const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion, service: normalizedService };
   sessions.set(String(chatId), draftSession);
-  const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region), {
+  const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region, normalizedService), {
     reply_markup: kaitDraftKeyboard(draftSession, draftKeyboardOpts(user, parsed)),
   });
   draftSession.draftMessageId = draftMessage.message_id;
@@ -649,6 +665,7 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
 
   const baseOrder = {
     id: orderId,
+    service: String(session.service || "PSC").toUpperCase() === "GOPAY" ? "GOPAY" : "PSC",
     telegramId: String(from.id),
     username: from.username || "",
     region: normalizeRegion(session.region, settings),
@@ -958,7 +975,12 @@ async function retryFailedOrder(chatId, from, sourceOrderId, callbackMessageId) 
     return;
   }
   // Pakai flow order yang sama: set session sementara, saldo otomatis dipotong di sana.
-  sessions.set(String(chatId), { mode: "confirm_kait", parsed, voucher: null });
+  sessions.set(String(chatId), {
+    mode: "confirm_kait",
+    parsed,
+    voucher: null,
+    service: orderService(src),
+  });
   await sendMessage(chatId, `🔁 Membuat order retry untuk ${parsed.valid.length} akun gagal (pakai saldo)...`);
   await deleteMessage(chatId, callbackMessageId);
   await createOrderFromSession(chatId, from, callbackMessageId);
@@ -992,59 +1014,43 @@ const liveQueueMessages = new Map();
 async function buildQueueView(telegramId) {
   const allOrders = await ordersStore.read();
   const activeOrders = allOrders.filter((order) => ["RUNNING", "QUEUED"].includes(order.status));
-  const totalQueueAccounts = activeOrders.reduce(
-    (sum, order) => sum + Number(order.remainingCount || order.totalAccounts || 0),
-    0
+  const myOrders = allOrders.filter(
+    (order) => order.telegramId === String(telegramId) && ["QUEUED", "RUNNING"].includes(order.status)
   );
-  const totalQueueOrders = activeOrders.length;
-  const totalAllAccounts = activeOrders.reduce((sum, order) => sum + Number(order.totalAccounts || 0), 0);
-  const totalDone = activeOrders.reduce((sum, order) => sum + Number(order.successCount || 0), 0);
-  const orders = allOrders
-    .filter((order) =>
-      order.telegramId === String(telegramId) &&
-      ["QUEUED", "RUNNING"].includes(order.status)
-    )
-    .slice(-10)
-    .reverse();
 
-  const peopleInQueue = new Set(activeOrders.map((order) => String(order.telegramId))).size;
+  function renderServiceQueue(service) {
+    const global = activeOrders.filter((order) => orderService(order) === service);
+    const mine = myOrders.filter((order) => orderService(order) === service);
+    const totalAccounts = global.reduce((sum, order) => sum + Number(order.totalAccounts || 0), 0);
+    const totalDone = global.reduce((sum, order) => sum + Number(order.successCount || 0), 0);
+    const label = serviceLabel(service);
+    const lines = [
+      `${service === "GOPAY" ? "🌐" : "🖥"} <b>Antrian ${label}</b>`,
+      `Order aktif: <b>${global.length}</b> • Progress: ${totalDone}/${totalAccounts}`,
+      `<code>${miniBar(totalDone, totalAccounts || 1)}</code>`,
+    ];
+    if (!mine.length) {
+      lines.push("Kamu belum punya order di antrean ini.");
+      return lines.join("\n");
+    }
+    for (const order of mine.slice(-5).reverse()) {
+      const position = global.findIndex((item) => String(item.id) === String(order.id)) + 1;
+      const icon = order.status === "RUNNING" ? "🟢" : "🕒";
+      lines.push(`${icon} #<code>${order.id}</code> • ${order.status} • ${order.successCount || 0}/${order.totalAccounts} akun${position > 0 ? ` • posisi ${position}` : ""}`);
+      const batches = Array.isArray(order.batches) ? order.batches : [];
+      for (const batch of batches) {
+        lines.push(`   Batch ${batch.round}: ${batch.success || 0}/${batch.total || 0} berhasil • ${batch.status || "QUEUED"}`);
+      }
+    }
+    return lines.join("\n");
+  }
 
   const text = [
     "📋 <b>Antrian Ngait</b>",
     "",
-    `👥 Orang di antrian: <b>${peopleInQueue}</b>`,
-    `📦 Order aktif: <b>${totalQueueOrders}</b>`,
-    `📧 Total gsuite ngait: <b>${totalQueueAccounts}</b>`,
+    renderServiceQueue("PSC"),
     "",
-    "📊 <b>Progress Total (semua order)</b>",
-    `<code>${miniBar(totalDone, totalAllAccounts || 1)}</code>`,
-    `${totalDone}/${totalAllAccounts} akun selesai`,
-    "",
-    "📜 <b>Antrian Kamu</b>",
-    orders.length
-      ? orders
-          .map((order, index) => {
-            const statusIcon = order.status === "RUNNING" ? "🟢" : "🕒";
-            const head = `${index + 1}. ${statusIcon} <b>${order.status}</b> — ${order.totalAccounts} akun  🆔 <code>${order.id}</code>`;
-            const batches = Array.isArray(order.batches) ? order.batches : [];
-            if (!batches.length) {
-              return `${head}\n   🕒 Menunggu diproses...`;
-            }
-            const batchLines = batches.map((b) => {
-              const total = Number(b.total || 0);
-              const success = Number(b.success || 0);
-              const done = b.status === "DONE";
-              const pct = done ? 100 : Math.floor((success / Math.max(1, total)) * 100);
-              const label = b.round === 1 ? `Batch ${b.round}` : `Batch ${b.round} (sisa ${total} gsuite)`;
-              return [
-                `   📦 ${label} — ✅ ${success}/${total} berhasil`,
-                `   <code>${miniBar(pct, 100)}</code>`,
-              ].join("\n");
-            });
-            return [head, ...batchLines].join("\n");
-          })
-          .join("\n\n")
-      : "Belum ada order paid/proses.",
+    renderServiceQueue("GOPAY"),
   ].join("\n");
 
   const reply_markup = {
@@ -1642,6 +1648,7 @@ async function handleAdminCommand(chatId, text) {
               : "";
             return [
               `🆔 <code>${order.id}</code>`,
+              `   🧩 Layanan: ${serviceLabel(orderService(order))}`,
               `   👤 ${order.username ? "@" + order.username : order.telegramId}`,
               `   📦 Order: ${order.totalAccounts} akun  |  ✅ Done: ${order.successCount || 0}/${order.totalAccounts}`,
               `   <code>${miniBar(order.successCount || 0, order.totalAccounts)}</code>`,
@@ -1760,6 +1767,10 @@ async function handleAdminCommand(chatId, text) {
 
     // PAUSE: hentikan sementara order yang sedang RUNNING (progres disimpan).
     if (command === "/pauseorder") {
+      if (orderService(order) === "GOPAY") {
+        await sendMessage(chatId, "Pause sementara belum dipakai untuk order GoPay. Gunakan /batalproses jika memang harus dihentikan.");
+        return true;
+      }
       if (order.status !== "RUNNING") {
         await sendMessage(chatId, `Order #${orderId} tidak sedang jalan (status ${order.status}). Pause hanya untuk order RUNNING.`);
         return true;
@@ -1771,6 +1782,10 @@ async function handleAdminCommand(chatId, text) {
 
     // LANJUTKAN: order yang PAUSED -> QUEUED (lanjut dari progres terakhir).
     if (command === "/lanjutkan" || command === "/resumeorder") {
+      if (orderService(order) === "GOPAY") {
+        await sendMessage(chatId, "Order GoPay berjalan otomatis per batch dan tidak memakai status PAUSED.");
+        return true;
+      }
       if (order.status !== "PAUSED") {
         await sendMessage(chatId, `Order #${orderId} tidak sedang di-pause (status ${order.status}).`);
         return true;
@@ -1789,7 +1804,12 @@ async function handleAdminCommand(chatId, text) {
       await ordersStore.patchItem("id", idv, { priority: Date.now(), status: order.status === "PAUSED" ? "QUEUED" : order.status });
       const pausedRunning = [];
       for (const o of orders) {
-        if (o.status === "RUNNING" && String(o.id) !== String(orderId)) {
+        if (
+          orderService(order) === "PSC" &&
+          orderService(o) === orderService(order) &&
+          o.status === "RUNNING" &&
+          String(o.id) !== String(orderId)
+        ) {
           const n2 = Number(o.id);
           const idv2 = [...new Set([o.id, String(o.id), ...(Number.isFinite(n2) ? [n2] : [])])];
           await ordersStore.patchItem("id", idv2, { pauseRequested: true });
@@ -2214,11 +2234,11 @@ async function handleMessage(message) {
     const voucher = await getActiveVoucher(code);
     if (!voucher) {
       await sendMessage(chatId, `Voucher "${code}" tidak valid / sudah habis.`);
-      await handleParsedKait(chatId, session.parsed, session.voucher || null);
+      await handleParsedKait(chatId, session.parsed, session.voucher || null, session.service);
       return;
     }
     await sendMessage(chatId, `🎟️ Voucher ${voucher.code} (-${voucher.percent}%) diterapkan.`);
-    await handleParsedKait(chatId, session.parsed, voucher);
+    await handleParsedKait(chatId, session.parsed, voucher, session.service);
     return;
   }
 
@@ -2229,7 +2249,7 @@ async function handleMessage(message) {
     }
     // User sudah kirim akun -> hapus pesan instruksi "Format: email|password..." biar bersih, lalu lanjut proses.
     if (session.promptMessageId) await deleteMessage(chatId, session.promptMessageId);
-    await handleParsedKait(chatId, parseGsuiteInput(content));
+    await handleParsedKait(chatId, parseGsuiteInput(content), null, session.service);
     return;
   }
 
@@ -2360,13 +2380,14 @@ async function handleCallback(query) {
     return;
   }
 
-  if (data === "kait_psc") {
+  if (data === "kait_psc" || data === "kait_gopay") {
+    const service = data === "kait_gopay" ? "GOPAY" : "PSC";
     const settings = await settingsStore.read();
     await deleteMessage(chatId, query.message?.message_id); // hapus menu home
     const promptMsg = await sendMessage(
       chatId,
       [
-        "🛒 <b>Kait PSC — Order</b>",
+        `${service === "GOPAY" ? "🌐" : "🛒"} <b>Kait ${serviceLabel(service)} — Order</b>`,
         "",
         "<b>Format: email|password</b>",
         `Min: ${getMinOrderForChat(chatId, settings)} akun`,
@@ -2374,11 +2395,12 @@ async function handleCallback(query) {
         "Format lain seperti email:pass, email;pass, email pass akan otomatis di-convert.",
         "Hanya email GSuite/Google Workspace. Email gratis akan ditolak.",
         "Lebih dari 50 akun wajib kirim file .txt.",
-      ].join("\n"),
+        service === "GOPAY" ? "Proses GoPay berjalan otomatis memakai 2 browser dan maksimal 3 batch." : "",
+      ].filter(Boolean).join("\n"),
       { reply_markup: backButton() }
     );
     // Simpan id pesan instruksi ini -> dihapus begitu user kirim akun (biar chat bersih, lanjut proses).
-    sessions.set(String(chatId), { mode: "awaiting_kait", promptMessageId: promptMsg?.message_id });
+    sessions.set(String(chatId), { mode: "awaiting_kait", promptMessageId: promptMsg?.message_id, service });
     return;
   }
 
@@ -2398,6 +2420,10 @@ async function handleCallback(query) {
       return;
     }
     const settings = await settingsStore.read();
+    if (String(session.service || "PSC").toUpperCase() === "GOPAY") {
+      await tg("answerCallbackQuery", { callback_query_id: query.id, text: "Order GoPay tidak memakai region PSC." }).catch(() => {});
+      return;
+    }
     session.region = nextRegion(session.region, settings);
     sessions.set(String(chatId), session);
     const users = await usersStore.read();
@@ -2406,7 +2432,7 @@ async function handleCallback(query) {
     await tg("editMessageText", {
       chat_id: chatId,
       message_id: session.draftMessageId || query.message?.message_id,
-      text: buildOrderSummary(session.parsed, settings, user, voucher, session.region),
+      text: buildOrderSummary(session.parsed, settings, user, voucher, session.region, session.service),
       parse_mode: "HTML",
       reply_markup: kaitDraftKeyboard(session, draftKeyboardOpts(user, session.parsed)),
     });

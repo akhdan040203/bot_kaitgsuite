@@ -1,0 +1,4 @@
+requests
+colorama
+python-dotenv
+playwright

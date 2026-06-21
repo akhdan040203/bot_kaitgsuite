@@ -197,6 +197,15 @@ Terminal 2:
 npm.cmd run worker:psc
 ```
 
+Terminal 3 (antrean GoPay terpisah):
+
+```powershell
+npm.cmd run worker:gopay
+```
+
+Worker GoPay memakai `GOPAY_BROWSERS=2` dan `GOPAY_MAX_BATCHES=3`. Pastikan dependency
+`autokaitgopay/requirements.txt`, browser Playwright Chromium, serta server OTP sudah aktif.
+
 ## 7. Admin Command
 
 ```text

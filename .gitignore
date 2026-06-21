@@ -19,6 +19,15 @@ Result-*.txt
 gsuite-gagal.txt
 used_doku_numbers.txt
 
+# Runtime lokal integrasi GoPay (berisi akun/hasil sensitif)
+autokaitgopay/Gsuite.txt
+autokaitgopay/GSUITETertautGoPay.txt
+autokaitgopay/GsuiteKosongan.txt
+autokaitgopay/checked.txt
+autokaitgopay/empty.txt
+autokaitgopay/Webhook.apk
+autokaitgopay/.claude/
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

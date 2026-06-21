@@ -795,7 +795,7 @@ async function loop() {
   let resetCount = 0;
   await ordersStore.update((orders) =>
     orders.map((o) => {
-      if (o.status === "RUNNING") {
+      if ((o.service || "PSC") === "PSC" && o.status === "RUNNING") {
         resetCount++;
         return { ...o, status: "QUEUED" };
       }
@@ -809,7 +809,12 @@ async function loop() {
       const orders = await ordersStore.read();
       // Pilih order: prioritas tertinggi dulu (priority desc), lalu yang paling lama (id asc).
       // Order status PAUSED TIDAK diambil (nunggu di-resume admin -> jadi QUEUED lagi).
-      const candidates = orders.filter((item) => item.status === "QUEUED" || item.status === "PAID");
+      // Order lama yang belum punya field service tetap dianggap PSC.
+      const candidates = orders.filter(
+        (item) =>
+          (item.service || "PSC") === "PSC" &&
+          (item.status === "QUEUED" || item.status === "PAID")
+      );
       candidates.sort((a, b) => (Number(b.priority || 0) - Number(a.priority || 0)) || (Number(a.id) - Number(b.id)));
       const order = candidates[0];
       if (!order) {
