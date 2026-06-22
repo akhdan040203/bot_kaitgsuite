@@ -638,14 +638,17 @@ class EmulatorAutomator:
         dismiss_buttons = ["Not now", "NOT NOW", "Nanti saja", "Jangan sekarang"]
 
         try:
+            hierarchy = (self.device.dump_hierarchy(compressed=False) or "").lower()
             is_welcome = any(
                 self.device(textContains=marker).exists(timeout=0)
                 for marker in welcome_markers
             )
             if not is_welcome:
+                is_welcome = any(marker.lower() in hierarchy for marker in welcome_markers)
+            if not is_welcome:
                 is_welcome = (
-                    self.device(textMatches="(?i)^(not now|nanti saja|jangan sekarang)$").exists(timeout=0)
-                    and self.device(textMatches="(?i)^(get started|mulai)$").exists(timeout=0)
+                    any(label in hierarchy for label in ["not now", "nanti saja", "jangan sekarang"])
+                    and any(label in hierarchy for label in ["get started", "mulai"])
                 )
         except Exception:
             is_welcome = False
@@ -656,7 +659,8 @@ class EmulatorAutomator:
         self.log_info("Play Store welcome terdeteksi, klik 'Not now'")
         for text in dismiss_buttons:
             try:
-                if self.device(text=text).click_exists(timeout=action_timeout(2)):
+                if (self.device(text=text).click_exists(timeout=action_timeout(1))
+                        or self.device(textContains=text).click_exists(timeout=action_timeout(1))):
                     pause(1)
                     return True
             except Exception:
@@ -667,6 +671,32 @@ class EmulatorAutomator:
             if button.click_exists(timeout=action_timeout(2)):
                 pause(1)
                 return True
+        except Exception:
+            pass
+
+        # Sebagian versi Play Store merender onboarding dengan Compose sehingga tombol
+        # terlihat di layar, tetapi node text-nya tidak bisa diklik oleh UiAutomator.
+        try:
+            for xpath in [
+                '//*[@text="Not now"]',
+                '//*[contains(@text, "Not now")]',
+                '//*[contains(@content-desc, "Not now")]',
+            ]:
+                if self.device.xpath(xpath).click_exists(timeout=action_timeout(1)):
+                    pause(1)
+                    return True
+        except Exception:
+            pass
+
+        # Fallback terakhir berdasarkan layout resmi: tombol "Not now" berada di kiri
+        # bawah. Hanya dilakukan setelah layar Welcome terverifikasi, jadi tidak akan
+        # menekan halaman Play Store biasa secara sembarang.
+        try:
+            width, height = self.device.window_size()
+            self.device.click(int(width * 0.30), int(height * 0.875))
+            self.log_info("Klik fallback posisi tombol 'Not now'")
+            pause(1.5)
+            return True
         except Exception:
             pass
 
@@ -760,6 +790,8 @@ class EmulatorAutomator:
             deadline = time.time() + action_timeout(8)
             store_ready = False
             while time.time() < deadline:
+                if self.dismiss_play_store_welcome():
+                    continue
                 if (self.device(resourceId="com.android.vending:id/account_menu_item").exists(timeout=0)
                         or self.device(descriptionContains="Account").exists(timeout=0)
                         or self.device(text="Games").exists(timeout=0)
