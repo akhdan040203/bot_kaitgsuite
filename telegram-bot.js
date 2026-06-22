@@ -224,8 +224,8 @@ function isAdmin(chatId) {
 function mainKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "🛒 Kait PSC — Order Sekarang", callback_data: "kait_psc" }],
-      [{ text: "🌐 Kait GoPay — Order Sekarang", callback_data: "kait_gopay" }],
+      [{ text: "🛒 Kait PSC", callback_data: "kait_psc" }],
+      [{ text: "🌐 Kait GoPay", callback_data: "kait_gopay" }],
       [
         { text: "📋 Antrian", callback_data: "queue" },
         { text: "🌍 Region", callback_data: "region_menu" },
