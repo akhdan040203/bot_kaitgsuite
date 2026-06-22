@@ -49,6 +49,7 @@ const settingsStore = new MongoStore("settings", {
 const vouchersStore = new MongoStore("vouchers", {});
 
 const sessions = new Map();
+const orderCreationLocks = new Set();
 let updateOffset = 0;
 let isCheckingPayments = false;
 
@@ -628,7 +629,14 @@ async function handleParsedKait(chatId, parsed, voucher, service = "PSC") {
 
   const defaultRegion = normalizeRegion(user && user.region, settings);
   const normalizedService = String(service).toUpperCase() === "GOPAY" ? "GOPAY" : "PSC";
-  const draftSession = { mode: "confirm_kait", parsed, voucher: voucher || null, region: defaultRegion, service: normalizedService };
+  const draftSession = {
+    mode: "confirm_kait",
+    parsed,
+    voucher: voucher || null,
+    region: defaultRegion,
+    service: normalizedService,
+    orderId: Date.now(),
+  };
   sessions.set(String(chatId), draftSession);
   const draftMessage = await sendMessage(chatId, buildOrderSummary(parsed, settings, user, voucher, draftSession.region, normalizedService), {
     reply_markup: kaitDraftKeyboard(draftSession, draftKeyboardOpts(user, parsed)),
@@ -638,6 +646,17 @@ async function handleParsedKait(chatId, parsed, voucher, service = "PSC") {
 }
 
 async function createOrderFromSession(chatId, from, callbackMessageId) {
+  const lockKey = String(chatId);
+  if (orderCreationLocks.has(lockKey)) return;
+  orderCreationLocks.add(lockKey);
+  try {
+    return await createOrderFromSessionUnlocked(chatId, from, callbackMessageId);
+  } finally {
+    orderCreationLocks.delete(lockKey);
+  }
+}
+
+async function createOrderFromSessionUnlocked(chatId, from, callbackMessageId) {
   const session = sessions.get(String(chatId));
   if (!session || session.mode !== "confirm_kait") {
     await sendMessage(chatId, "Tidak ada draft order aktif.");
@@ -646,7 +665,8 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
 
   const settings = await settingsStore.read();
   const parsed = session.parsed;
-  const orderId = Date.now();
+  // ID ditetapkan saat draft dibuat agar klik callback berulang tetap merujuk order sama.
+  const orderId = Number(session.orderId || Date.now());
   const orderPath = path.join(ORDER_DIR, String(orderId));
   fs.mkdirSync(orderPath, { recursive: true });
   fs.writeFileSync(path.join(orderPath, "input.txt"), parsed.convertedText);
@@ -700,10 +720,18 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
   // ===== Order GRATIS (credit + voucher menutup semua biaya) =====
   if (isFree) {
     const order = { ...baseOrder, status: "QUEUED", payment: { provider: "credit", status: "PAID" }, paidAt: now };
+    let inserted = false;
     await ordersStore.update((orders) => {
+      if (orders.some((item) => String(item.id) === String(orderId))) return orders;
       orders.push(order);
+      inserted = true;
       return orders;
     });
+    if (!inserted) {
+      sessions.delete(String(chatId));
+      await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
+      return;
+    }
     await consumeOrderBenefits(orderId);
     log(`created order #${orderId} GRATIS pakai credit user=@${order.username || "-"} accounts=${order.totalAccounts} creditUsed=${pricing.freeUsed}`);
     sessions.delete(String(chatId));
@@ -761,10 +789,18 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
     payment: { ...invoice, orderId, amount: totalPrice, status: "PENDING" },
   };
 
+  let inserted = false;
   await ordersStore.update((orders) => {
+    if (orders.some((item) => String(item.id) === String(orderId))) return orders;
     orders.push(order);
+    inserted = true;
     return orders;
   });
+  if (!inserted) {
+    sessions.delete(String(chatId));
+    await deleteMessage(chatId, session.draftMessageId || callbackMessageId);
+    return;
+  }
   log(`created order #${order.id} user=@${order.username || "-"} accounts=${order.totalAccounts} total=${order.totalPrice}`);
   sessions.delete(String(chatId));
 
@@ -848,6 +884,17 @@ async function createOrderFromSession(chatId, from, callbackMessageId) {
 // Topup Credit: beli credit sejumlah kekurangan (accounts - credit) via QRIS.
 // Setelah dibayar, credit user bertambah (lihat markOrderPaid -> cabang kind "topup").
 async function createCreditTopup(chatId, from, callbackMessageId) {
+  const lockKey = String(chatId);
+  if (orderCreationLocks.has(lockKey)) return;
+  orderCreationLocks.add(lockKey);
+  try {
+    return await createCreditTopupUnlocked(chatId, from, callbackMessageId);
+  } finally {
+    orderCreationLocks.delete(lockKey);
+  }
+}
+
+async function createCreditTopupUnlocked(chatId, from, callbackMessageId) {
   const session = sessions.get(String(chatId));
   if (!session || session.mode !== "confirm_kait" || !session.parsed) {
     await sendMessage(chatId, "Tidak ada draft order aktif.");
@@ -1708,6 +1755,15 @@ async function handleAdminCommand(chatId, text) {
           `🆔 Order: <code>${orderId}</code>`,
           `📧 Jumlah akun: <b>${paidOrder.totalAccounts || 0}</b>`,
           "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses. 🙏",
+        ].join("\n")
+      ).catch(() => {});
+      await notifyAdmins(
+        [
+          `✅ <b>Order #${orderId} LUNAS (manual)</b>`,
+          `🧩 Layanan: ${serviceLabel(orderService(paidOrder))}`,
+          `👤 ${paidOrder.username ? "@" + paidOrder.username : paidOrder.telegramId}`,
+          `📧 ${paidOrder.totalAccounts || 0} akun • 💰 ${formatRupiah(paidOrder.totalPrice || 0)}`,
+          "📋 Masuk antrian.",
         ].join("\n")
       ).catch(() => {});
     }
