@@ -1841,14 +1841,6 @@ def fast_process_emulator(automator):
 
     processed_count = 0
     success_count = 0
-    consecutive_fail = 0  # gagal beruntun (untuk circuit breaker)
-    # Seed any_success dari success.txt: kalau RONDE SEBELUMNYA sudah ada yang sukses,
-    # JANGAN abort (breaker hanya untuk kasus "dari awal gagal semua, belum pernah sukses").
-    try:
-        any_success = os.path.exists(RESULT_FILE) and os.path.getsize(RESULT_FILE) > 0
-    except Exception:
-        any_success = False
-    abort_after = int(os.getenv("PSC_ABORT_AFTER_FAILS", "50"))  # 0 = matikan breaker
 
     while True:
         try:
@@ -1867,23 +1859,12 @@ def fast_process_emulator(automator):
                 # Tidak terdaftar -> skip permanen, hapus dari input biar tidak di-retry.
                 remove_processed_account(email)
                 automator.log_info(f"SKIP (tidak terdaftar): {email}")
-                consecutive_fail += 1
             elif result:
                 success_count += 1
-                any_success = True
-                consecutive_fail = 0
                 remove_processed_account(email)
                 automator.log_info(f"SUCCESS: {success_count}/{processed_count} accounts processed successfully")
             else:
                 automator.log_info(f"FAILED: {success_count}/{processed_count} accounts processed successfully")
-                consecutive_fail += 1
-
-            # CIRCUIT BREAKER: kalau dari AWAL gagal terus (belum ada 1 pun sukses) dan sudah
-            # mencapai batas -> kemungkinan akun/jaringan bermasalah semua -> BATALKAN order.
-            if abort_after > 0 and not any_success and consecutive_fail >= abort_after:
-                automator.log_error(f"ABORT: {consecutive_fail} akun pertama GAGAL semua (belum ada sukses) -> batalkan order")
-                print(f"PSC_ABORT|{consecutive_fail} akun pertama gagal semua di awal (kemungkinan akun/jaringan bermasalah)", flush=True)
-                break
         except Empty:
             break
         except Exception as e:

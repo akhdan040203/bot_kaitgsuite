@@ -217,8 +217,6 @@ function runPscWorker(order, attempt, onProgress) {
     let stdoutBuffer = "";
     let stopped = false;
     let paused = false;
-    let aborted = false;
-    let abortReason = "";
 
     // Cek berkala: kalau admin MEMBATALKAN (CANCELLED) -> stop & batal; kalau admin PAUSE
     // (pauseRequested) -> stop tapi tandai paused (progress disimpan, bisa dilanjut).
@@ -258,15 +256,6 @@ function runPscWorker(order, attempt, onProgress) {
       stdoutBuffer = lines.pop() || "";
 
       for (const line of lines) {
-        // Sinyal ABORT dari Python (circuit breaker: banyak akun gagal di awal).
-        const ab = line.match(/^PSC_ABORT\|(.+)$/);
-        if (ab) {
-          aborted = true;
-          abortReason = ab[1].trim();
-          log(`order #${order.id} ABORT dari worker python: ${abortReason}`);
-          killChildTree(child);
-          continue;
-        }
         const match = line.match(/^PSC_PROGRESS\|([^|]+)\|(\d+)\|(.+)$/);
         if (!match || typeof onProgress !== "function") continue;
         onProgress({
@@ -296,10 +285,6 @@ function runPscWorker(order, attempt, onProgress) {
       clearInterval(cancelPoll);
       clearTimeout(killTimer);
       log(`attempt ${attempt}: mumu-psc.py exited with code ${code}`);
-      if (aborted) {
-        resolve({ resultFile, logFile, aborted: true, abortReason });
-        return;
-      }
       if (paused) {
         resolve({ resultFile, logFile, paused: true });
         return;
@@ -458,7 +443,6 @@ async function processOrder(order) {
       // Satu pass per round: mumu-psc.py memproses SELURUH akun sisa (input.txt) sekali jalan.
       // Round 1 = semua akun; round berikutnya = hanya yang masih gagal. Maks maxRetryRounds round.
       let stoppedThisRound = false;
-      let abortedReason = null;
       let pausedThisRound = false;
       try {
         const r = await runPscWorker(order, `${round}`, (progress) => {
@@ -470,7 +454,6 @@ async function processOrder(order) {
         logFile = r.logFile;
         stoppedThisRound = Boolean(r.stopped);
         pausedThisRound = Boolean(r.paused);
-        if (r.aborted) abortedReason = r.abortReason || "banyak akun gagal di awal";
       } catch (error) {
         log(`order #${order.id} round ${round} worker error: ${error.message}`);
       }
@@ -482,60 +465,6 @@ async function processOrder(order) {
         log(`order #${order.id} -> PAUSED (sukses ${sukses}/${totalAccounts}), bisa dilanjut dengan /lanjutkan`);
         await notify(notifyId, `⏸️ Order #${order.id} di-pause sementara (progres ${sukses}/${totalAccounts} disimpan). Akan dilanjutkan nanti.`).catch(() => {});
         return; // bebaskan worker -> ambil order lain (yang diprioritaskan)
-      }
-
-      // AUTO-ABORT: banyak akun gagal di awal -> batalkan SELURUH order + refund + notif buyer.
-      if (abortedReason) {
-        const successNow = countLines(resultFile);
-        const refundAbort = Math.max(0, totalAccounts - successNow);
-        await updateOrder(order.id, {
-          status: "CANCELLED",
-          autoAborted: true,
-          successCount: successNow,
-          remainingCount: refundAbort,
-          finishedAt: new Date().toISOString(),
-        });
-        // Refund akun yang belum berhasil -> credit (buyer tidak rugi).
-        if (refundAbort > 0) {
-          await usersStore.update((users) => {
-            const u = users[order.telegramId];
-            if (u) u.credit = Number(u.credit || 0) + refundAbort;
-            return users;
-          });
-        }
-        log(`order #${order.id} AUTO-ABORT: ${abortedReason} (sukses ${successNow}, refund ${refundAbort})`);
-        if (successNow > 0) {
-          await sendDocument(notifyId, resultFile, `✅ Sebagian berhasil order #${order.id} — ${successNow} akun`).catch(() => {});
-        }
-        // Kirim FILE akun SISA (belum berhasil) ke buyer -> biar bisa order ulang pakai credit.
-        const remainingAbort = subtractLines(originalAccounts, [
-          ...readLines(resultFile),
-          ...readLines(notRegisteredFile),
-        ]);
-        if (remainingAbort.length > 0) {
-          const abortRemainingFile = path.join(order.orderPath, "sisa-belum-diproses.txt");
-          writeLines(abortRemainingFile, remainingAbort);
-          await sendDocument(
-            notifyId,
-            abortRemainingFile,
-            `📄 Akun SISA belum diproses order #${order.id} — ${remainingAbort.length} akun (sudah jadi credit, bisa order ulang)`
-          ).catch(() => {});
-        }
-        await notify(
-          notifyId,
-          [
-            `❌ <b>Order #${order.id} dibatalkan otomatis.</b>`,
-            "",
-            `Alasan: ${abortedReason}.`,
-            `Berhasil: ${successNow} • Sisa belum diproses: ${refundAbort} akun`,
-            refundAbort > 0 ? `\n🎁 ${refundAbort} akun dikembalikan jadi credit (bisa dipakai order berikutnya).` : "",
-            "📄 File akun sisa dikirim di atas — tinggal order ulang pakai credit.",
-            "\nKemungkinan akun gsuite bermasalah/tidak didukung, atau jaringan sedang gangguan. Silakan coba lagi nanti / ganti akun.",
-          ].filter(Boolean).join("\n")
-        );
-        await deleteNotify(notifyId, progressMessageId);
-        if (order.queueMessageId) await deleteNotify(notifyId, order.queueMessageId);
-        return; // hentikan proses order ini
       }
 
       if (stoppedThisRound || (await isOrderCancelled(order.id))) break;
