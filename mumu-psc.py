@@ -632,6 +632,47 @@ class EmulatorAutomator:
         
         self.log_info("Popup check completed")
 
+    def dismiss_play_store_welcome(self):
+        """Tutup layar onboarding Play Store agar navigasi payment tidak tertahan."""
+        welcome_markers = ["Welcome to Google Play", "Selamat datang di Google Play"]
+        dismiss_buttons = ["Not now", "NOT NOW", "Nanti saja", "Jangan sekarang"]
+
+        try:
+            is_welcome = any(
+                self.device(textContains=marker).exists(timeout=0)
+                for marker in welcome_markers
+            )
+            if not is_welcome:
+                is_welcome = (
+                    self.device(textMatches="(?i)^(not now|nanti saja|jangan sekarang)$").exists(timeout=0)
+                    and self.device(textMatches="(?i)^(get started|mulai)$").exists(timeout=0)
+                )
+        except Exception:
+            is_welcome = False
+
+        if not is_welcome:
+            return False
+
+        self.log_info("Play Store welcome terdeteksi, klik 'Not now'")
+        for text in dismiss_buttons:
+            try:
+                if self.device(text=text).click_exists(timeout=action_timeout(2)):
+                    pause(1)
+                    return True
+            except Exception:
+                continue
+
+        try:
+            button = self.device(textMatches="(?i)^(not now|nanti saja|jangan sekarang)$")
+            if button.click_exists(timeout=action_timeout(2)):
+                pause(1)
+                return True
+        except Exception:
+            pass
+
+        self.log_warn("Play Store welcome terlihat, tetapi tombol 'Not now' belum bisa diklik")
+        return False
+
     def fast_remove_google_account(self, email):
         """Hapus akun Google dengan navigasi & konfirmasi yang lebih tahan banting."""
         try:
@@ -778,7 +819,7 @@ class EmulatorAutomator:
         # Daftar city pilihan per region (URUT prioritas). City pertama dicoba duluan.
         # France: UTAMAKAN 'France - Strasbourg' (Alsace & Paris dikecualikan). Germany: Nuremberg. Spain: Barcelona.
         city_map = {
-            "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "UK - East London").split(",") if c.strip()],
+            "UK": [c.strip() for c in os.getenv("VPN_CITIES_UK", "UK - London,UK - East London").split(",") if c.strip()],
             "FRANCE": [c.strip() for c in os.getenv("VPN_CITIES_FRANCE", "France - Strasbourg").split(",") if c.strip()],
             "GERMANY": [c.strip() for c in os.getenv("VPN_CITIES_GERMANY", "Germany - Nuremberg,Germany - Frankfurt - 1,Germany - Berlin").split(",") if c.strip()],
             "SPAIN": [c.strip() for c in os.getenv("VPN_CITIES_SPAIN", "Spain - Barcelona,Spain - Barcelona - 2,Spain - Madrid,Spain - Valencia").split(",") if c.strip()],
@@ -1269,6 +1310,11 @@ class EmulatorAutomator:
                 if already_on_payment():
                     self.log_info("Sudah di halaman payment saat menunggu, lanjut")
                     return True
+                # Login pertama dapat berhenti di onboarding "Welcome to Google Play".
+                # Tutup saat loop menunggu, lalu beri kesempatan Play Store memuat home.
+                if self.dismiss_play_store_welcome():
+                    blank_since = time.time()
+                    continue
                 if home_ready():
                     state = "home"
                     break
