@@ -2405,15 +2405,15 @@ async function handleCallback(query) {
     const promptMsg = await sendMessage(
       chatId,
       [
-        `${service === "GOPAY" ? "🌐" : "🛒"} <b>Kait ${serviceLabel(service)} — Order</b>`,
+        `${service === "GOPAY" ? "🌐" : "🛒"} <b>Kait ${serviceLabel(service)}</b>`,
         "",
-        "<b>Format: email|password</b>",
-        `Min: ${getMinOrderForChat(chatId, settings)} akun`,
+        "Kirim daftar akun GSuite dengan format:",
+        "<code>email|password</code>",
         "",
-        "Format lain seperti email:pass, email;pass, email pass akan otomatis di-convert.",
-        "Hanya email GSuite/Google Workspace. Email gratis akan ditolak.",
-        "Lebih dari 50 akun wajib kirim file .txt.",
-        service === "GOPAY" ? "⚠️ <b>Note: Tidak Garansi, Jika terkena country detect.</b>" : "",
+        `Minimal order: <b>${getMinOrderForChat(chatId, settings)} akun</b>`,
+        "• Maksimal 50 akun jika dikirim langsung melalui chat.",
+        "• Lebih dari 50 akun, kirim menggunakan file <b>.txt</b>.",
+        service === "GOPAY" ? "\n⚠️ <b>Note:</b> Tidak garansi jika terkena country detect." : "",
       ].filter(Boolean).join("\n"),
       { reply_markup: backButton() }
     );
