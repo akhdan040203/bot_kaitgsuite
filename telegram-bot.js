@@ -410,12 +410,12 @@ async function upsertUser(from) {
 
 let _botStatsCache = null;
 let _botStatsAt = 0;
+let _startLogoFileId = process.env.START_LOGO_FILE_ID || "";
 async function botStats() {
   // Cache statistik (baca seluruh orders+users itu berat) -> /start & /admin jadi cepat.
   const ttl = Number(process.env.BOT_STATS_CACHE_MS || 30000);
   if (_botStatsCache && Date.now() - _botStatsAt < ttl) return _botStatsCache;
-  const users = await usersStore.read();
-  const orders = await ordersStore.read();
+  const [users, orders] = await Promise.all([usersStore.read(), ordersStore.read()]);
   const totalKait = orders
     .filter((order) => order.status === "DONE")
     .reduce((sum, order) => sum + Number(order.successCount || 0), 0);
@@ -424,13 +424,12 @@ async function botStats() {
   return _botStatsCache;
 }
 
-async function showHome(chatId, from) {
-  const user = await upsertUser(from);
-  const settings = await settingsStore.read();
+async function showHome(chatId, from, knownUser = null) {
+  const user = knownUser || await upsertUser(from);
+  const [settings, stats] = await Promise.all([settingsStore.read(), botStats()]);
   const username = user.username ? `@${user.username}` : "-";
 
   // Bot Info: total ngait global + milestone bonus (tiap {step} ngait -> +{per} credit).
-  const stats = await botStats();
   const milestoneStep = Number(process.env.BONUS_MILESTONE_STEP || 1000);
   const milestonePer = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
   const userKait = Number(user.totalKait || 0);
@@ -465,7 +464,15 @@ async function showHome(chatId, from) {
   ].join("\n");
 
   if (fs.existsSync(START_LOGO_PATH)) {
-    await sendPhotoFile(chatId, START_LOGO_PATH, homeText, { reply_markup: mainKeyboard() });
+    if (_startLogoFileId) {
+      await sendPhoto(chatId, _startLogoFileId, homeText, { reply_markup: mainKeyboard() });
+      return;
+    }
+    const sent = await sendPhotoFile(chatId, START_LOGO_PATH, homeText, { reply_markup: mainKeyboard() });
+    const photos = sent && Array.isArray(sent.photo) ? sent.photo : [];
+    if (photos.length && photos[photos.length - 1].file_id) {
+      _startLogoFileId = photos[photos.length - 1].file_id;
+    }
     return;
   }
 
@@ -1253,10 +1260,14 @@ async function checkAndUpdatePayment(chatId, orderId) {
   }
 }
 
-async function cancelOrder(chatId, orderId) {
+async function cancelOrder(chatId, orderId, from, callbackMessageId) {
   const target = (await ordersStore.read()).find((order) => String(order.id) === String(orderId));
   if (!target) {
     await sendMessage(chatId, "Order tidak ditemukan.");
+    return;
+  }
+  if (!isAdmin(chatId) && String(target.telegramId) !== String(chatId)) {
+    await sendMessage(chatId, "Order ini bukan milikmu.");
     return;
   }
 
@@ -1290,7 +1301,14 @@ async function cancelOrder(chatId, orderId) {
     return;
   }
 
-  await sendMessage(chatId, `Order #${orderId} dibatalkan.`);
+  sessions.delete(String(chatId));
+  const messageIds = new Set(
+    [callbackMessageId, target.paymentMessageId].filter(Boolean).map(String)
+  );
+  for (const messageId of messageIds) {
+    await deleteMessage(target.paymentChatId || chatId, Number(messageId));
+  }
+  await showHome(chatId, from || { id: chatId });
 }
 
 async function autoCheckPayments() {
@@ -2131,7 +2149,7 @@ async function broadcastPhoto(adminChatId, message) {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const from = message.from || message.chat;
-  await upsertUser(from);
+  const currentUser = await upsertUser(from);
 
   // ADMIN: kirim hasil ngait manual ke customer -> file .txt dengan caption "/kirimhasil ORDER_ID".
   if (isAdmin(chatId) && message.document && /^\/(kirimhasil|hasil)\b/i.test(message.caption || "")) {
@@ -2147,8 +2165,8 @@ async function handleMessage(message) {
 
   const text = message.text || "";
   if (text.startsWith("/") && isAdmin(chatId) && (await handleAdminCommand(chatId, text))) return;
-  if (text === "/start") return showHome(chatId, from);
-  if (text === "🚀 Menu" || text.toLowerCase() === "menu") return showHome(chatId, from);
+  if (text === "/start") return showHome(chatId, from, currentUser);
+  if (text === "🚀 Menu" || text.toLowerCase() === "menu") return showHome(chatId, from, currentUser);
   if (text === "📊 Status" || text.toLowerCase() === "status") return showStatus(chatId, from);
 
   if (text.startsWith("/saldo")) {
@@ -2501,7 +2519,9 @@ async function handleCallback(query) {
     return;
   }
   if (data.startsWith("checkpay_")) return checkAndUpdatePayment(chatId, data.replace("checkpay_", ""));
-  if (data.startsWith("cancel_order_")) return cancelOrder(chatId, data.replace("cancel_order_", ""));
+  if (data.startsWith("cancel_order_")) {
+    return cancelOrder(chatId, data.replace("cancel_order_", ""), from, query.message?.message_id);
+  }
   if (data.startsWith("retry_")) return retryFailedOrder(chatId, from, data.replace("retry_", ""), query.message?.message_id);
 }
 
