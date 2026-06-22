@@ -369,6 +369,7 @@ async function processOrder(order) {
     let lastEditAt = 0;
     let batches = []; // [{ round, total, success, status }] untuk tampilan antrian per-batch
     let successBeforeRoundLive = 0;
+    let lastPersistedSuccess = countLines(resultFile);
 
     const updateRealtimeProgress = async ({ email, percent, label }) => {
       accountProgress.set(email, percent);
@@ -383,6 +384,17 @@ async function processOrder(order) {
 
       // Persen ASLI = total progress semua akun / jumlah akun. Bar hanya penuh kalau benar2 selesai.
       const overallPercent = Math.min(100, Math.floor(progressSum / Math.max(1, totalAccounts)));
+      const currentSuccess = Math.max(lastPersistedSuccess, successEmails.size);
+      // Angka sukses di antrian tidak boleh ikut throttle bar 2%. Untuk order besar,
+      // throttle tersebut membuat Batch terlihat 0 lama meski success.txt terus bertambah.
+      if (batches.length) {
+        batches[batches.length - 1].success = Math.max(0, currentSuccess - successBeforeRoundLive);
+      }
+      if (currentSuccess > lastPersistedSuccess) {
+        lastPersistedSuccess = currentSuccess;
+        await updateOrder(order.id, { successCount: currentSuccess, batches });
+      }
+
       const step = Number(process.env.PROGRESS_STEP_PERCENT || 2);
       const minInterval = Number(process.env.PROGRESS_MIN_INTERVAL_MS || 2500);
       const now = Date.now();
@@ -392,12 +404,8 @@ async function processOrder(order) {
       }
       lastShownPercent = overallPercent;
       lastEditAt = now;
-      // Update success batch berjalan (live).
-      if (batches.length) {
-        batches[batches.length - 1].success = Math.max(0, successEmails.size - successBeforeRoundLive);
-      }
       // Update Done (successCount) live ke DB biar /orders & antrian bergerak realtime.
-      await updateOrder(order.id, { successCount: successEmails.size, progressPercent: overallPercent, batches });
+      await updateOrder(order.id, { successCount: currentSuccess, progressPercent: overallPercent, batches });
       const doneEquivalent = (overallPercent / 100) * totalAccounts;
       await editNotify(
         notifyId,

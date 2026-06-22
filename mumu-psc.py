@@ -1515,10 +1515,10 @@ class EmulatorAutomator:
             # Check if DOKU already exists
             if self.has_paysafecard_payment_method(timeout=3):
                 self.log_info(f"✅ DOKU already exists on account {email}")
-                self.emit_progress(email, 100, "paysafecard sudah ada")
-                
                 # Save successful account (DOKU sudah ada)
                 self.save_successful_account_safe(email, password)
+                # Emit sesudah file tersimpan agar worker membaca jumlah sukses terbaru.
+                self.emit_progress(email, 100, "paysafecard sudah ada")
                 
                 # Remove account after finding existing DOKU
                 if self.fast_remove_google_account(email):
@@ -1601,10 +1601,10 @@ class EmulatorAutomator:
             # Quick success verification - PENTING: Hanya save jika benar-benar berhasil
             if verified:
                 self.log_info(f"✅ PaysafeCard successfully added to account {email}")
-                self.emit_progress(email, 100, "berhasil validasi play store")
-
                 # HANYA save ke file hasil jika DOKU benar-benar berhasil ditambahkan
                 self.save_successful_account_safe(email, password)
+                # Emit sesudah file tersimpan agar angka batch langsung ikut bertambah.
+                self.emit_progress(email, 100, "berhasil validasi play store")
 
                 # Fast account removal after success
                 if self.fast_remove_google_account(email):
