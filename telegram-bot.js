@@ -1118,6 +1118,7 @@ async function buildQueueView(telegramId) {
 
 async function showQueue(chatId, telegramId, existingMessageId = null) {
   let messageId = existingMessageId;
+  let staleMessageId = null;
   if (messageId) {
     liveQueueMessages.delete(`${chatId}:${messageId}`);
     try {
@@ -1129,6 +1130,7 @@ async function showQueue(chatId, telegramId, existingMessageId = null) {
       });
     } catch (error) {
       if (!String(error.message || "").toLowerCase().includes("not modified")) {
+        staleMessageId = messageId;
         messageId = null;
       }
     }
@@ -1136,6 +1138,9 @@ async function showQueue(chatId, telegramId, existingMessageId = null) {
   if (!messageId) {
     const loading = await sendMessage(chatId, "⏳ Memuat data antrean...");
     messageId = loading?.message_id || null;
+    if (staleMessageId && String(staleMessageId) !== String(messageId)) {
+      await deleteMessage(chatId, staleMessageId);
+    }
   }
 
   const view = await buildQueueView(telegramId);
@@ -1154,6 +1159,14 @@ async function showQueue(chatId, telegramId, existingMessageId = null) {
   }
   // Daftarkan pesan ini supaya di-update OTOMATIS (tanpa Refresh) selama beberapa menit.
   if (messageId) {
+    // Satu chat hanya boleh punya satu pesan antrean live. Hapus bar lama agar
+    // refresh/fallback edit tidak meninggalkan beberapa antrean sekaligus.
+    for (const [key, queueMessage] of liveQueueMessages) {
+      if (String(queueMessage.chatId) !== String(chatId)) continue;
+      if (String(queueMessage.messageId) === String(messageId)) continue;
+      liveQueueMessages.delete(key);
+      await deleteMessage(queueMessage.chatId, queueMessage.messageId);
+    }
     const durationMs = Number(process.env.QUEUE_AUTOREFRESH_MINUTES || 5) * 60 * 1000;
     liveQueueMessages.set(`${chatId}:${messageId}`, {
       chatId,
@@ -2377,6 +2390,7 @@ async function handleCallback(query) {
 
   if (data === "back_menu") {
     sessions.delete(String(chatId));
+    liveQueueMessages.delete(`${chatId}:${query.message?.message_id}`);
     await deleteMessage(chatId, query.message?.message_id);
     return showHome(chatId, from);
   }
