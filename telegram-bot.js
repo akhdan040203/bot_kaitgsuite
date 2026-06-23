@@ -324,11 +324,12 @@ function statusIcon(status) {
 // Bar mini dari jumlah akun yang sukses ngait.
 function miniBar(done, total) {
   const t = Math.max(1, Number(total || 0));
-  const d = Math.min(t, Math.max(0, Number(done || 0)));
-  const percent = Math.floor((d / t) * 100);
-  const seg = 10;
+  const rawDone = Math.min(t, Math.max(0, Number(done || 0)));
+  const d = rawDone >= t ? t : Math.min(t - 1, Math.ceil(rawDone));
+  const percent = Math.round((d / t) * 100);
+  const seg = 16;
   const filled = Math.round((percent / 100) * seg);
-  return `[${"▰".repeat(filled)}${"▱".repeat(seg - filled)}] ${percent}%`;
+  return `[${"█".repeat(filled)}${"▒".repeat(seg - filled)}] ${percent}%`;
 }
 
 async function deleteMessage(chatId, messageId) {

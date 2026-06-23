@@ -190,11 +190,11 @@ function runPython(order, label, script, args, logFile, accountCount, onProgress
 }
 
 function progressText(order, round, success, total, remaining, phase) {
-  const percent = Math.floor((Number(success || 0) / Math.max(1, Number(total || 0))) * 100);
-  const filled = Math.floor(percent / 10);
+  const percent = Math.round((Number(success || 0) / Math.max(1, Number(total || 0))) * 100);
+  const filled = Math.round((percent / 100) * 16);
   return [
     `🌐 <b>GoPay Order #${order.id}</b>`,
-    `<code>[${"#".repeat(filled)}${"-".repeat(10 - filled)}]</code> <b>${percent}%</b>`,
+    `<code>[${"█".repeat(filled)}${"▒".repeat(16 - filled)}]</code> <b>${percent}%</b>`,
     `${success}/${total} gsuite terverifikasi`,
     `Batch ${round}/${MAX_BATCHES} • ${phase} • sisa ${remaining}`,
   ].join("\n");
@@ -203,12 +203,12 @@ function progressText(order, round, success, total, remaining, phase) {
 function activityProgressText(order, round, stage, done, stageTotal, verified, total, remaining) {
   const safeStageTotal = Math.max(1, Number(stageTotal || 0));
   const stageRatio = Math.min(1, Math.max(0, Number(done || 0) / safeStageTotal));
-  const percent = Math.floor((stage === "CHECK" ? 50 : 0) + stageRatio * 50);
-  const filled = Math.floor(percent / 10);
+  const percent = Math.round((stage === "CHECK" ? 50 : 0) + stageRatio * 50);
+  const filled = Math.round((percent / 100) * 16);
   const label = stage === "CHECK" ? "checker" : "mengaitkan";
   return [
     `🌐 <b>GoPay Order #${order.id}</b>`,
-    `<code>[${"#".repeat(filled)}${"-".repeat(10 - filled)}]</code> <b>${percent}%</b>`,
+    `<code>[${"█".repeat(filled)}${"▒".repeat(16 - filled)}]</code> <b>${percent}%</b>`,
     `Batch ${round}/${MAX_BATCHES} • ${label}: ${done}/${stageTotal} akun`,
     `Terverifikasi: ${verified}/${total} • sisa ${remaining}`,
   ].join("\n");

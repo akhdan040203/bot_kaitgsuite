@@ -158,28 +158,30 @@ function subtractLines(sourceLines, removeLines) {
 
 function progressBar(done, total) {
   const safeTotal = Math.max(1, Number(total || 0));
-  const safeDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
-  const percent = Math.floor((safeDone / safeTotal) * 100);
-  const filled = Math.floor(percent / 10);
-  return `[${"█".repeat(filled)}${"░".repeat(10 - filled)}] ${percent}%`;
+  const rawDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  const safeDone = rawDone >= safeTotal ? safeTotal : Math.min(safeTotal - 1, Math.ceil(rawDone));
+  const percent = Math.round((safeDone / safeTotal) * 100);
+  const filled = Math.round((percent / 100) * 16);
+  return `[${"█".repeat(filled)}${"▒".repeat(16 - filled)}] ${percent}%`;
 }
 
 function progressBarAscii(done, total) {
   const safeTotal = Math.max(1, Number(total || 0));
-  const safeDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
-  const percent = Math.floor((safeDone / safeTotal) * 100);
-  const filled = Math.floor(percent / 10);
-  return `[${"#".repeat(filled)}${"-".repeat(10 - filled)}] ${percent}%`;
+  const rawDone = Math.min(safeTotal, Math.max(0, Number(done || 0)));
+  const safeDone = rawDone >= safeTotal ? safeTotal : Math.min(safeTotal - 1, Math.ceil(rawDone));
+  const percent = Math.round((safeDone / safeTotal) * 100);
+  const filled = Math.round((percent / 100) * 16);
+  return `[${"█".repeat(filled)}${"▒".repeat(16 - filled)}] ${percent}%`;
 }
 
 function renderProgress(order, phase, done, total, detail = "") {
   const safeTotal = Math.max(1, Number(total || 0));
   const doneNum = Math.min(safeTotal, Math.max(0, Number(done || 0)));
-  const percent = Math.floor((doneNum / safeTotal) * 100);
-  const segments = 20;
+  const displayDone = doneNum >= safeTotal ? safeTotal : Math.min(safeTotal - 1, Math.ceil(doneNum));
+  const percent = Math.round((displayDone / safeTotal) * 100);
+  const segments = 16;
   const filled = Math.round((percent / 100) * segments);
-  const bar = "█".repeat(filled) + "░".repeat(segments - filled);
-  const displayDone = Number.isInteger(done) ? done : doneNum.toFixed(1);
+  const bar = "█".repeat(filled) + "▒".repeat(segments - filled);
   // Realtime ringkas: bar + persen + jumlah gsuite saja.
   return [
     `🔗 <b>Ngait Order #${order.id}</b>`,

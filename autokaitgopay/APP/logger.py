@@ -61,9 +61,9 @@ class ProgressTracker:
     def progress_bar(self):
         if self.total == 0:
             return ""
-        filled = int((self.done / self.total) * 20)
-        bar = "█" * filled + "░" * (20 - filled)
-        pct = int((self.done / self.total) * 100)
+        filled = round((self.done / self.total) * 16)
+        bar = "█" * filled + "▒" * (16 - filled)
+        pct = round((self.done / self.total) * 100)
         return f"{C.GRAY}[{C.GREEN}{bar}{C.GRAY}] {C.WHITE}{pct}%{C.RESET}"
 
     @property
