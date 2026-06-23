@@ -1116,15 +1116,48 @@ async function buildQueueView(telegramId) {
   return { text, reply_markup };
 }
 
-async function showQueue(chatId, telegramId) {
+async function showQueue(chatId, telegramId, existingMessageId = null) {
+  let messageId = existingMessageId;
+  if (messageId) {
+    liveQueueMessages.delete(`${chatId}:${messageId}`);
+    try {
+      await tg("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: "⏳ Memuat data antrean...",
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (error) {
+      if (!String(error.message || "").toLowerCase().includes("not modified")) {
+        messageId = null;
+      }
+    }
+  }
+  if (!messageId) {
+    const loading = await sendMessage(chatId, "⏳ Memuat data antrean...");
+    messageId = loading?.message_id || null;
+  }
+
   const view = await buildQueueView(telegramId);
-  const sent = await sendMessage(chatId, view.text, { reply_markup: view.reply_markup });
+  if (messageId) {
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: view.text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: view.reply_markup,
+    });
+  } else {
+    const sent = await sendMessage(chatId, view.text, { reply_markup: view.reply_markup });
+    messageId = sent?.message_id || null;
+  }
   // Daftarkan pesan ini supaya di-update OTOMATIS (tanpa Refresh) selama beberapa menit.
-  if (sent && sent.message_id) {
+  if (messageId) {
     const durationMs = Number(process.env.QUEUE_AUTOREFRESH_MINUTES || 5) * 60 * 1000;
-    liveQueueMessages.set(`${chatId}:${sent.message_id}`, {
+    liveQueueMessages.set(`${chatId}:${messageId}`, {
       chatId,
-      messageId: sent.message_id,
+      messageId,
       telegramId: String(telegramId),
       until: Date.now() + durationMs,
       lastText: view.text,
@@ -2541,12 +2574,15 @@ async function handleCallback(query) {
     return;
   }
   if (data === "queue") {
-    await deleteMessage(chatId, query.message?.message_id); // hapus menu home -> tampil antrian saja
-    return showQueue(chatId, from.id);
+    // Tampilkan loading dan hapus menu secara paralel agar klik terasa langsung merespons.
+    const [loading] = await Promise.all([
+      sendMessage(chatId, "⏳ Memuat data antrean..."),
+      deleteMessage(chatId, query.message?.message_id),
+    ]);
+    return showQueue(chatId, from.id, loading?.message_id);
   }
   if (data === "refresh_queue") {
-    await deleteMessage(chatId, query.message?.message_id);
-    return showQueue(chatId, from.id);
+    return showQueue(chatId, from.id, query.message?.message_id);
   }
   if (data === "price_info") {
     const settings = await settingsStore.read();
