@@ -544,6 +544,11 @@ function adminRegionKeyboard(settings) {
   rows.push([{ text: "⬅️ Tutup", callback_data: "back_menu" }]);
   return { inline_keyboard: rows };
 }
+function paymentButtonLabel(label) {
+  // Telegram tidak punya fixed-width inline button; em-space menjaga lebar visual
+  // setelah keterangan panjang dalam kurung dihapus dari label.
+  return `\u2003\u2003\u2003${label}\u2003\u2003\u2003`;
+}
 function kaitDraftKeyboard(session, opts = {}) {
   const credit = Math.max(0, Number(opts.credit || 0));
   const accounts = Math.max(0, Number(opts.accounts || 0));
@@ -553,17 +558,17 @@ function kaitDraftKeyboard(session, opts = {}) {
   }
   if (accounts > 0 && credit >= accounts) {
     // Credit cukup -> PILIHAN: bayar pakai credit (gratis) ATAU QRIS penuh (simpan credit).
-    rows.push([{ text: `💳 Bayar pakai Credit`, callback_data: "pay_credit" }]);
-    rows.push([{ text: `🧾 Bayar QRIS penuh`, callback_data: "pay_qris" }]);
+    rows.push([{ text: paymentButtonLabel(`💳 Bayar pakai Credit`), callback_data: "pay_credit" }]);
+    rows.push([{ text: paymentButtonLabel(`🧾 Bayar QRIS penuh`), callback_data: "pay_qris" }]);
   } else if (credit > 0) {
     // Ada credit tapi kurang -> PILIHAN: kombinasi credit+QRIS, topup credit, atau QRIS penuh.
     const kurang = accounts - credit;
-    rows.push([{ text: `💳 ${credit} credit + QRIS ${kurang} akun`, callback_data: "pay_credit" }]);
-    rows.push([{ text: `➕ Topup Credit`, callback_data: "topup_credit" }]);
-    rows.push([{ text: `🧾 Bayar QRIS penuh`, callback_data: "pay_qris" }]);
+    rows.push([{ text: paymentButtonLabel(`💳 ${credit} credit + QRIS ${kurang} akun`), callback_data: "pay_credit" }]);
+    rows.push([{ text: paymentButtonLabel(`➕ Topup Credit`), callback_data: "topup_credit" }]);
+    rows.push([{ text: paymentButtonLabel(`🧾 Bayar QRIS penuh`), callback_data: "pay_qris" }]);
   } else {
     // Tidak ada credit -> QRIS saja.
-    rows.push([{ text: "🧾 Bayar QRIS", callback_data: "pay_qris" }]);
+    rows.push([{ text: paymentButtonLabel("🧾 Bayar QRIS"), callback_data: "pay_qris" }]);
   }
   rows.push([{ text: "🎟️ Pakai Voucher", callback_data: "apply_voucher" }]);
   rows.push([{ text: "Batal", callback_data: "cancel_session" }]);
