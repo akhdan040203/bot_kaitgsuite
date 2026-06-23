@@ -553,14 +553,14 @@ function kaitDraftKeyboard(session, opts = {}) {
   }
   if (accounts > 0 && credit >= accounts) {
     // Credit cukup -> PILIHAN: bayar pakai credit (gratis) ATAU QRIS penuh (simpan credit).
-    rows.push([{ text: `💳 Bayar pakai Credit (${accounts} akun • GRATIS)`, callback_data: "pay_credit" }]);
-    rows.push([{ text: `🧾 Bayar QRIS penuh (simpan credit)`, callback_data: "pay_qris" }]);
+    rows.push([{ text: `💳 Bayar pakai Credit`, callback_data: "pay_credit" }]);
+    rows.push([{ text: `🧾 Bayar QRIS penuh`, callback_data: "pay_qris" }]);
   } else if (credit > 0) {
     // Ada credit tapi kurang -> PILIHAN: kombinasi credit+QRIS, topup credit, atau QRIS penuh.
     const kurang = accounts - credit;
     rows.push([{ text: `💳 ${credit} credit + QRIS ${kurang} akun`, callback_data: "pay_credit" }]);
-    rows.push([{ text: `➕ Topup Credit (${kurang} akun)`, callback_data: "topup_credit" }]);
-    rows.push([{ text: `🧾 Bayar QRIS penuh (simpan credit)`, callback_data: "pay_qris" }]);
+    rows.push([{ text: `➕ Topup Credit`, callback_data: "topup_credit" }]);
+    rows.push([{ text: `🧾 Bayar QRIS penuh`, callback_data: "pay_qris" }]);
   } else {
     // Tidak ada credit -> QRIS saja.
     rows.push([{ text: "🧾 Bayar QRIS", callback_data: "pay_qris" }]);
@@ -584,19 +584,19 @@ function buildOrderSummary(parsed, settings, user, voucher, region, service = "P
   const lines = [
     `<b>Order Kait ${isGopay ? "GoPay" : "PSC"}</b>`,
     "",
-    isGopay ? "🌐 Proses: Browser (2 paralel)" : `🌍 Region: <b>${regionLabel(region)}</b>`,
+    isGopay ? "🌐 Proses: Browser • 2 paralel" : `🌍 Region: <b>${regionLabel(region)}</b>`,
     `Total input: ${parsed.totalInput}`,
     `Valid Gsuite: ${parsed.valid.length}`,
     `Invalid: ${parsed.invalid.length}`,
     `Duplicate: ${parsed.duplicate}`,
     "",
-    `Harga: ${formatRupiah(p.pricePerAccount)} / akun (sesuai jumlah akun)`,
+    `Harga per akun: ${formatRupiah(p.pricePerAccount)}`,
   ];
-  if (p.freeUsed > 0) lines.push(`🎁 Credit dipakai: ${p.freeUsed} akun (gratis)`);
+  if (p.freeUsed > 0) lines.push(`🎁 Credit dipakai: ${p.freeUsed} akun`);
   lines.push(`Akun kena biaya: ${p.chargeableCount}`);
   lines.push(`Subtotal: ${formatRupiah(p.subtotal)}`);
-  if (p.voucherCode) lines.push(`🎟️ Voucher ${p.voucherCode} (-${p.voucherPercent}%): -${formatRupiah(p.voucherDiscount)}`);
-  lines.push(`Total: <b>${formatRupiah(p.afterDiscount)}</b>${p.afterDiscount === 0 ? " (GRATIS pakai credit)" : ""}`);
+  if (p.voucherCode) lines.push(`🎟️ Voucher ${p.voucherCode} -${p.voucherPercent}%: -${formatRupiah(p.voucherDiscount)}`);
+  lines.push(`Total: <b>${formatRupiah(p.afterDiscount)}</b>`);
   if (p.afterDiscount > 0) lines.push("Total final dibuat setelah QRIS agar bisa diberi kode unik.");
   return lines.join("\n");
 }
