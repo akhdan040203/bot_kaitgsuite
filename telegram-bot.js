@@ -457,7 +457,6 @@ async function showHome(chatId, from, knownUser = null) {
     `Total Terkait: <b>${fmt(stats.totalKait)}</b>`,
     `Milestone: <b>${fmt(milestoneStep)}</b> terkait (bonus +${milestonePer} credit)`,
     `Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
-    `<code>${miniBar(userKait % milestoneStep, milestoneStep)}</code>`,
     `kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
     "",
     line,
