@@ -2256,6 +2256,24 @@ async function broadcastPhoto(adminChatId, message) {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const from = message.from || message.chat;
+  const text = message.text || "";
+
+  // /start harus langsung terasa merespons meski pembacaan user/statistik atau upload
+  // logo sedang lambat. Loading dan database dijalankan paralel, lalu loading dihapus.
+  if (/^\/start(?:\s|$)/i.test(text)) {
+    tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
+    const [currentUser, loading] = await Promise.all([
+      upsertUser(from),
+      sendMessage(chatId, "⏳ Memuat menu...").catch(() => null),
+    ]);
+    try {
+      await showHome(chatId, from, currentUser);
+    } finally {
+      if (loading?.message_id) await deleteMessage(chatId, loading.message_id);
+    }
+    return;
+  }
+
   const currentUser = await upsertUser(from);
 
   // ADMIN: kirim hasil ngait manual ke customer -> file .txt dengan caption "/kirimhasil ORDER_ID".
@@ -2270,9 +2288,7 @@ async function handleMessage(message) {
     return;
   }
 
-  const text = message.text || "";
   if (text.startsWith("/") && isAdmin(chatId) && (await handleAdminCommand(chatId, text))) return;
-  if (text === "/start") return showHome(chatId, from, currentUser);
   if (text === "🚀 Menu" || text.toLowerCase() === "menu") return showHome(chatId, from, currentUser);
   if (text === "📊 Status" || text.toLowerCase() === "status") return showStatus(chatId, from);
 
