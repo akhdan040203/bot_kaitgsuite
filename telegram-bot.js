@@ -2533,6 +2533,7 @@ async function handleCallback(query) {
         "",
         "Kirim daftar akun GSuite dengan format:",
         "<code>email|password</code>",
+        "Format lain seperti <code>email:password</code>, <code>email;password</code>, atau <code>email password</code> akan otomatis dikonversi.",
         "",
         `Minimal order: <b>${getMinOrderForChat(chatId, settings)} akun</b>`,
         "• Maksimal 50 akun jika dikirim langsung melalui chat.",
