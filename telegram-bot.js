@@ -436,7 +436,6 @@ async function showHome(chatId, from, knownUser = null) {
   const milestonePer = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
   const userKait = Number(user.totalKait || 0);
   const nextMilestone = (Math.floor(userKait / milestoneStep) + 1) * milestoneStep;
-  const toNext = Math.max(0, nextMilestone - userKait);
 
   const fmt = (n) => Number(n || 0).toLocaleString("id-ID");
   const line = "━━━━━━━━━━━━━━━";
@@ -458,7 +457,6 @@ async function showHome(chatId, from, knownUser = null) {
     `Total Terkait: <b>${fmt(stats.totalKait)}</b>`,
     `Milestone: <b>${fmt(milestoneStep)}</b> terkait (bonus +${milestonePer} credit)`,
     `Progress: <b>${fmt(userKait)}</b> / ${fmt(nextMilestone)}`,
-    `kurang <b>${fmt(toNext)}</b> ngait lagi → +${milestonePer} credit`,
     "",
     line,
     `Support: ${formatTelegramSupport(settings.support)}`,
