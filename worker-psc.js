@@ -627,9 +627,9 @@ async function processOrder(order) {
         if (refundCredit > 0) {
           user.credit = Number(user.credit || 0) + refundCredit;
         }
-        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +50 credit akun.
+        // Bonus loyalitas: tiap kelipatan 1000 akun ngait -> +70 credit akun.
         const step = Number(process.env.BONUS_MILESTONE_STEP || 1000);
-        const perMilestone = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
+        const perMilestone = Number(process.env.BONUS_CREDIT_PER_1000 || 70);
         const before = Number(user.bonusMilestone || 0);
         const reached = Math.floor(user.totalKait / step) * step;
         if (reached > before) {

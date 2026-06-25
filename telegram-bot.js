@@ -433,7 +433,7 @@ async function showHome(chatId, from, knownUser = null) {
 
   // Bot Info: total ngait global + milestone bonus (tiap {step} ngait -> +{per} credit).
   const milestoneStep = Number(process.env.BONUS_MILESTONE_STEP || 1000);
-  const milestonePer = Number(process.env.BONUS_CREDIT_PER_1000 || 50);
+  const milestonePer = Number(process.env.BONUS_CREDIT_PER_1000 || 70);
   const userKait = Number(user.totalKait || 0);
   const nextMilestone = (Math.floor(userKait / milestoneStep) + 1) * milestoneStep;
 
