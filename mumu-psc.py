@@ -860,7 +860,7 @@ class EmulatorAutomator:
         # City yang DILARANG dipilih per region (kalau city utama gagal, jangan jatuh ke sini).
         # France: JANGAN pakai Paris & Alsace.
         exclude_map = {
-            "UK": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_UK", "").split(",") if x.strip()],
+            "UK": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_UK", "Tottenham").split(",") if x.strip()],
             "FRANCE": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_FRANCE", "Paris,Alsace").split(",") if x.strip()],
             "GERMANY": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_GERMANY", "").split(",") if x.strip()],
             "SPAIN": [x.strip().lower() for x in os.getenv("VPN_EXCLUDE_SPAIN", "").split(",") if x.strip()],
@@ -939,6 +939,13 @@ class EmulatorAutomator:
                 return False
 
         def on_target_location():
+            for x in excludes:
+                try:
+                    if x and self.device(textContains=x).exists(timeout=0):
+                        self.log_warn(f"VPN lokasi mengandung excluded city '{x}' -> tidak dianggap cocok")
+                        return False
+                except Exception:
+                    continue
             for m in matches:
                 try:
                     if self.device(textContains=m).exists(timeout=0):
@@ -1155,6 +1162,10 @@ class EmulatorAutomator:
                     continue
             # Semua city sudah dicoba / tidak ketemu -> fallback klik baris negara tepat.
             self.log_warn(f"Tidak ada city {country} baru yang belum dicoba (sudah coba: {sorted(tried_locations)})")
+            allow_country_fallback = os.getenv(f"VPN_ALLOW_COUNTRY_FALLBACK_{region}", "0" if region == "UK" else "1")
+            if str(allow_country_fallback).strip().lower() in ("0", "false", "no", "off"):
+                self.log_warn(f"Fallback klik negara '{country}' dimatikan untuk {region}, supaya tidak jatuh ke city default app")
+                return False
             return click_country_row()
 
         def switch_city_loop():
