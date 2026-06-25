@@ -2693,7 +2693,7 @@ async function handleCallback(query) {
   if (data === "help") {
     const settings = await settingsStore.read();
     await deleteMessage(chatId, query.message?.message_id); // hapus menu home
-    await sendMessage(chatId, `🆘 <b>Bantuan & Support</b>\n\nSupport: ${formatTelegramSupport(settings.support)}`, {
+    await sendMessage(chatId, `<b>Bantuan & Support</b>\n\nSupport: ${formatTelegramSupport(settings.support)}`, {
       reply_markup: backButton(),
     });
     return;
