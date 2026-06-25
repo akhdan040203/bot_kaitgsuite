@@ -1681,9 +1681,10 @@ async function handleAdminCommand(chatId, text) {
       const userNotice =
         delta > 0
           ? [
-              `🎁 <b>Bonus credit +${delta} akun masuk!</b>`,
+              `🎁 <b>Bonus Credit Ditambahkan</b>`,
               "",
-              `Credit sekarang: <b>${newCredit} akun</b>`,
+              `✨ Bonus masuk: <b>+${delta} credit</b>`,
+              `💳 Total credit yang kamu punya: <b>${newCredit} credit</b>`,
               "Credit bisa dipakai gratis untuk order ngait berikutnya.",
             ].join("\n")
           : [
