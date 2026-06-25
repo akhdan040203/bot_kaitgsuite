@@ -753,12 +753,12 @@ async function createOrderFromSessionUnlocked(chatId, from, callbackMessageId) {
     await sendMessage(
       chatId,
       [
-        `🎉 <b>Order #${orderId} GRATIS!</b>`,
+        `✅ <b>Order #${orderId} masuk antrian</b>`,
         "",
-        `Total akun: ${order.totalAccounts}`,
-        `🎁 Credit dipakai: ${pricing.freeUsed} akun`,
+        `📧 Total akun: <b>${order.totalAccounts}</b>`,
+        `🎁 Credit dipakai: <b>${pricing.freeUsed} credit</b>`,
         pricing.voucherCode ? `🎟️ Voucher ${pricing.voucherCode} (-${pricing.voucherPercent}%)` : "",
-        "Langsung masuk antrian, tidak perlu bayar.",
+        "📋 Order akan segera diproses.",
       ].filter(Boolean).join("\n")
     );
     await notifyAdmins(
