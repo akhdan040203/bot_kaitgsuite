@@ -1681,9 +1681,8 @@ async function handleAdminCommand(chatId, text) {
       const userNotice =
         delta > 0
           ? [
-              "🎁 <b>Kamu mendapat bonus credit!</b>",
+              `🎁 <b>Bonus credit +${delta} akun masuk!</b>`,
               "",
-              `Bonus masuk: <b>+${delta} akun</b>`,
               `Credit sekarang: <b>${newCredit} akun</b>`,
               "Credit bisa dipakai gratis untuk order ngait berikutnya.",
             ].join("\n")
@@ -1691,6 +1690,7 @@ async function handleAdminCommand(chatId, text) {
               "ℹ️ <b>Credit kamu diperbarui.</b>",
               "",
               `Credit sebelumnya: <b>${oldCredit} akun</b>`,
+              `Perubahan: <b>${delta > 0 ? "+" : ""}${delta} akun</b>`,
               `Credit sekarang: <b>${newCredit} akun</b>`,
             ].join("\n");
       await sendMessage(targetId, userNotice);
