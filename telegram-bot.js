@@ -1103,9 +1103,24 @@ async function buildQueueView(telegramId) {
       return lines.join("\n");
     }
     for (const order of mine.slice(-5).reverse()) {
-      const position = global.findIndex((item) => String(item.id) === String(order.id)) + 1;
+      const queueInfo = getQueueInfo(order.id, allOrders);
+      const position = queueInfo?.position || global.findIndex((item) => String(item.id) === String(order.id)) + 1;
       const icon = order.status === "RUNNING" ? "🟢" : "🕒";
       lines.push(`${icon} #<code>${order.id}</code> • ${order.status} • ${order.successCount || 0}/${order.totalAccounts} akun${position > 0 ? ` • posisi ${position}` : ""}`);
+      if (queueInfo) {
+        const secondsPerAccount = Number(process.env.ESTIMATE_SECONDS_PER_ACCOUNT || 120);
+        const remainingAccounts = Math.max(
+          0,
+          Number(order.remainingCount || order.totalAccounts || 0) - Number(order.successCount || 0)
+        );
+        const processMs = remainingAccounts * secondsPerAccount * 1000;
+        if (order.status === "RUNNING") {
+          lines.push(`   ⏳ Estimasi selesai: ${formatDuration(processMs)}`);
+        } else {
+          const startText = queueInfo.etaMs > 0 ? formatDuration(queueInfo.etaMs) : "segera";
+          lines.push(`   ⏳ Estimasi mulai: ${startText} • selesai: ${formatDuration(queueInfo.etaMs + processMs)}`);
+        }
+      }
       const batches = Array.isArray(order.batches) ? order.batches : [];
       for (const batch of batches) {
         lines.push(`   Batch ${batch.round}: ${batch.success || 0}/${batch.total || 0} berhasil • ${batch.status || "QUEUED"}`);
