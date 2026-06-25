@@ -1657,10 +1657,12 @@ async function handleAdminCommand(chatId, text) {
     }
     let found = false;
     let newCredit = 0;
+    let oldCredit = 0;
     await usersStore.update((users) => {
       if (users[targetId]) {
         found = true;
         const current = Number(users[targetId].credit || 0);
+        oldCredit = current;
         newCredit = Math.max(0, command === "/setsaldo" ? amount : current + amount);
         users[targetId].credit = newCredit;
       }
@@ -1675,7 +1677,23 @@ async function handleAdminCommand(chatId, text) {
       `✅ Credit user <code>${targetId}</code> sekarang: <b>${newCredit} akun</b>.`
     );
     try {
-      await sendMessage(targetId, `🎁 Credit ngait kamu diperbarui admin. Sekarang: <b>${newCredit} akun</b> (bisa dipakai gratis untuk ngait).`);
+      const delta = newCredit - oldCredit;
+      const userNotice =
+        delta > 0
+          ? [
+              "🎁 <b>Kamu mendapat bonus credit dari admin!</b>",
+              "",
+              `Bonus masuk: <b>+${delta} akun</b>`,
+              `Credit sekarang: <b>${newCredit} akun</b>`,
+              "Credit bisa dipakai gratis untuk order ngait berikutnya.",
+            ].join("\n")
+          : [
+              "ℹ️ <b>Credit kamu diperbarui admin.</b>",
+              "",
+              `Credit sebelumnya: <b>${oldCredit} akun</b>`,
+              `Credit sekarang: <b>${newCredit} akun</b>`,
+            ].join("\n");
+      await sendMessage(targetId, userNotice);
     } catch (_) {}
     return true;
   }
