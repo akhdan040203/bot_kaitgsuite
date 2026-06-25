@@ -1295,6 +1295,22 @@ class EmulatorAutomator:
                     return True
             except Exception:
                 pass
+            try:
+                h = (self.device.dump_hierarchy(compressed=False) or "").lower()
+                payment_markers = [
+                    "paymentmethods",
+                    "payment methods",
+                    "metode pembayaran",
+                    "add paysafecard",
+                    "tambahkan paysafecard",
+                    "paysafecard",
+                    "payments.google.com",
+                    "play.google.com/store/paymentmethods",
+                ]
+                if any(marker in h for marker in payment_markers):
+                    return True
+            except Exception:
+                pass
             return False
 
         def home_ready():
@@ -1346,7 +1362,8 @@ class EmulatorAutomator:
                 self.log_info("Direct payment methods dimatikan via PSC_DIRECT_PAYMENT_LINK=0")
                 return False
             direct_tries = int(os.getenv("PSC_PAYMENT_DIRECT_TRIES", "2"))
-            direct_wait = float(os.getenv("PSC_PAYMENT_DIRECT_WAIT_SEC", "10"))
+            direct_wait = float(os.getenv("PSC_PAYMENT_DIRECT_WAIT_SEC", "18"))
+            direct_grace = float(os.getenv("PSC_PAYMENT_DIRECT_GRACE_SEC", "6"))
             for direct_attempt in range(1, direct_tries + 1):
                 self.close_notification_shade()
                 try:
@@ -1381,6 +1398,11 @@ class EmulatorAutomator:
                         pause(0.5)
                         continue
                     pause(0.3)
+                # Kadang payment page sudah siap tapi UIAutomator telat baca elemen.
+                # Jangan langsung fallback/force-close; kasih grace timeout dulu.
+                if wait_payment_ready(timeout=direct_grace):
+                    self.log_info(f"Payment methods siap via direct grace-check ({direct_attempt}/{direct_tries})")
+                    return True
                 self.log_warn(f"Direct payment methods belum siap ({direct_attempt}/{direct_tries}), fallback bila habis")
             return False
 
@@ -1404,6 +1426,9 @@ class EmulatorAutomator:
 
         auth_err_count = 0  # hitung "Authentication Error" -> retry terbatas, lalu gagal (jangan stuck)
         for attempt in range(1, tries + 1):
+            if wait_payment_ready(timeout=float(os.getenv("PSC_PAYMENT_BEFORE_FALLBACK_CHECK_SEC", "5"))):
+                self.log_info("Payment methods sudah siap sebelum fallback Play Store, skip force-stop")
+                return True
             self.close_notification_shade()
             self.device.press("home")
             pause(0.5)
