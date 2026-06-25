@@ -1271,15 +1271,16 @@ class EmulatorAutomator:
         return False
 
     def open_payment_methods(self, email):
-        """Buka Play Store app lalu navigasi ke Payment methods (cara reliable, tidak blank).
-        Tunggu home siap + tangani 'Try again' sebelum navigasi."""
+        """Buka Payment methods.
+        Jalur cepat: direct deeplink ke payment methods.
+        Fallback: buka Play Store home lalu navigasi menu seperti flow lama."""
         tries = int(os.getenv("PSC_PLAYSTORE_TRIES", "3"))
         error_markers = [
             "Try again", "TRY AGAIN", "Retry", "Coba lagi", "COBA LAGI",
             "Something went wrong", "Terjadi kesalahan",
             "No connection", "Couldn't connect", "Tidak ada koneksi",
         ]
-        ready_pay = ["Add PaysafeCard", "Payment methods", "Metode pembayaran"]
+        ready_pay = ["Add PaysafeCard", "Payment methods", "Metode pembayaran", "Tambahkan paysafecard"]
 
         def already_on_payment():
             # Sudah di halaman payment methods / Add PaysafeCard / paysafecard? -> jangan restart.
@@ -1307,6 +1308,82 @@ class EmulatorAutomator:
             except Exception:
                 return False
 
+        def wait_any_text(texts, timeout=4):
+            deadline = time.time() + action_timeout(timeout)
+            while time.time() < deadline:
+                for text in texts:
+                    try:
+                        if self.device(textContains=text).exists(timeout=0):
+                            return True
+                    except Exception:
+                        continue
+                pause(0.2)
+            return False
+
+        def wait_payment_ready(timeout=6):
+            deadline = time.time() + action_timeout(timeout)
+            while time.time() < deadline:
+                if already_on_payment():
+                    return True
+                if self.dismiss_play_store_welcome():
+                    pause(0.2)
+                    continue
+                pause(0.25)
+            return already_on_payment()
+
+        def start_payment_deeplink():
+            url = os.getenv(
+                "PSC_PAYMENT_METHODS_URL",
+                "https://play.google.com/store/paymentmethods?hl=id&pli=1",
+            ).replace('"', "%22")
+            self.log_info(f"Buka direct payment methods: {url}")
+            self.device.shell(
+                f'am start -a android.intent.action.VIEW -d "{url}" -p com.android.vending'
+            )
+
+        def try_direct_payment_methods():
+            if os.getenv("PSC_DIRECT_PAYMENT_LINK", "1").strip().lower() in ("0", "false", "no", "off"):
+                self.log_info("Direct payment methods dimatikan via PSC_DIRECT_PAYMENT_LINK=0")
+                return False
+            direct_tries = int(os.getenv("PSC_PAYMENT_DIRECT_TRIES", "2"))
+            direct_wait = float(os.getenv("PSC_PAYMENT_DIRECT_WAIT_SEC", "10"))
+            for direct_attempt in range(1, direct_tries + 1):
+                self.close_notification_shade()
+                try:
+                    start_payment_deeplink()
+                except Exception as e:
+                    self.log_warn(f"Direct payment methods gagal start ({direct_attempt}/{direct_tries}): {e}")
+                    continue
+                deadline = time.time() + action_timeout(direct_wait)
+                while time.time() < deadline:
+                    if already_on_payment():
+                        self.log_info(f"Payment methods siap via direct link ({direct_attempt}/{direct_tries})")
+                        return True
+                    if self.dismiss_play_store_welcome():
+                        # Setelah onboarding ditutup, panggil deeplink ulang agar tidak berhenti di home.
+                        try:
+                            start_payment_deeplink()
+                        except Exception:
+                            pass
+                        continue
+                    clicked_error = False
+                    for em in error_markers:
+                        try:
+                            sel = self.device(textContains=em)
+                            if sel.exists(timeout=0):
+                                self.log_warn(f"Direct payment error '{em}', klik coba lagi")
+                                sel.click_exists(timeout=action_timeout(1))
+                                clicked_error = True
+                                break
+                        except Exception:
+                            continue
+                    if clicked_error:
+                        pause(0.5)
+                        continue
+                    pause(0.3)
+                self.log_warn(f"Direct payment methods belum siap ({direct_attempt}/{direct_tries}), fallback bila habis")
+            return False
+
         def screen_is_blank():
             # Blank = hierarchy sangat pendek (tidak ada konten). Halaman payment/webview yang
             # ada isinya (walau teks tak terbaca) -> TIDAK blank, jadi jangan di-relaunch.
@@ -1320,6 +1397,9 @@ class EmulatorAutomator:
         # langsung lanjut TANPA restart Play Store (biar tidak close & buka ulang sia-sia).
         if already_on_payment():
             self.log_info("Sudah di halaman payment methods, lanjut tanpa restart Play Store")
+            return True
+
+        if try_direct_payment_methods():
             return True
 
         auth_err_count = 0  # hitung "Authentication Error" -> retry terbatas, lalu gagal (jangan stuck)
@@ -1436,15 +1516,19 @@ class EmulatorAutomator:
                         break
                 except Exception:
                     continue
-            pause(1)
+            if account_clicked:
+                wait_any_text(["Payments", "Pembayaran"], timeout=3)
 
             # Navigasi: Payments & subscriptions -> Payment methods.
-            for en_text, id_text in [
-                ("Payments & subscriptions", "Pembayaran & langganan"),
-                ("Payment methods", "Metode pembayaran"),
-            ]:
-                self.click_candidates(texts=[en_text, id_text], timeout=3)
-                pause(1.5)
+            if not already_on_payment():
+                self.click_candidates(texts=["Payments & subscriptions", "Pembayaran & langganan"], timeout=3)
+                if not wait_any_text(["Payment methods", "Metode pembayaran", "Add PaysafeCard"], timeout=5):
+                    pause(0.5)
+            if not already_on_payment():
+                self.click_candidates(texts=["Payment methods", "Metode pembayaran"], timeout=3)
+                if wait_payment_ready(timeout=5):
+                    self.log_info(f"Payment methods siap (attempt {attempt})")
+                    return True
 
             # Cek halaman payment methods sudah terbuka.
             for rm in ready_pay:
