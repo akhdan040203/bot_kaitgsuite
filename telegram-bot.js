@@ -299,6 +299,18 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
+async function editMessageText(chatId, messageId, text, extra = {}) {
+  if (!chatId || !messageId) return null;
+  return tg("editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...extra,
+  });
+}
+
 async function notifyAdmins(text, exceptChatId) {
   for (const adminId of ADMIN_IDS) {
     if (exceptChatId && String(adminId) === String(exceptChatId)) continue;
@@ -1304,17 +1316,25 @@ async function markOrderPaid(orderId) {
 
   // Notif PEMBAYARAN BERHASIL -> ke USER (buyer) & ADMIN (sebelumnya cuma notif "menunggu pembayaran").
   const notifyId = order.notifyTo || order.telegramId;
-  const sentPaid = await sendMessage(
+  const paidText = [
+    "✅ <b>Pembayaran berhasil!</b>",
+    "",
+    `🆔 Order: <code>${orderId}</code>`,
+    `📧 Jumlah akun: <b>${order.totalAccounts || 0}</b>`,
+    "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses.",
+    "Pantau progresnya ya. 🙏",
+  ].join("\n");
+  let sentPaid = await sendMessage(
     notifyId,
-    [
-      "✅ <b>Pembayaran berhasil!</b>",
-      "",
-      `🆔 Order: <code>${orderId}</code>`,
-      `📧 Jumlah akun: <b>${order.totalAccounts || 0}</b>`,
-      "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses.",
-      "Pantau progresnya ya. 🙏",
-    ].join("\n")
+    "⏳ <b>Pembayaran terdeteksi...</b>\nSedang memasukkan order ke antrian."
   ).catch(() => null);
+  if (sentPaid && sentPaid.message_id) {
+    await editMessageText(notifyId, sentPaid.message_id, paidText).catch(async () => {
+      sentPaid = await sendMessage(notifyId, paidText).catch(() => sentPaid);
+    });
+  } else {
+    sentPaid = await sendMessage(notifyId, paidText).catch(() => null);
+  }
   // Simpan id pesan ini -> nanti worker UBAH pesan ini jadi bar "sedang diproses" (1 pesan berkembang).
   if (sentPaid && sentPaid.message_id) {
     await ordersStore
@@ -1815,16 +1835,24 @@ async function handleAdminCommand(chatId, text) {
     const paidOrder = (await ordersStore.read()).find((o) => String(o.id) === String(orderId));
     if (paidOrder) {
       const notifyId = paidOrder.notifyTo || paidOrder.telegramId;
-      await sendMessage(
+      const manualPaidText = [
+        "✅ <b>Pembayaran berhasil!</b>",
+        "",
+        `🆔 Order: <code>${orderId}</code>`,
+        `📧 Jumlah akun: <b>${paidOrder.totalAccounts || 0}</b>`,
+        "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses. 🙏",
+      ].join("\n");
+      const loadingPaid = await sendMessage(
         notifyId,
-        [
-          "✅ <b>Pembayaran berhasil!</b>",
-          "",
-          `🆔 Order: <code>${orderId}</code>`,
-          `📧 Jumlah akun: <b>${paidOrder.totalAccounts || 0}</b>`,
-          "📋 Order kamu sudah <b>masuk antrian</b> & akan segera diproses. 🙏",
-        ].join("\n")
-      ).catch(() => {});
+        "⏳ <b>Pembayaran terdeteksi...</b>\nSedang memasukkan order ke antrian."
+      ).catch(() => null);
+      if (loadingPaid && loadingPaid.message_id) {
+        await editMessageText(notifyId, loadingPaid.message_id, manualPaidText).catch(async () => {
+          await sendMessage(notifyId, manualPaidText).catch(() => {});
+        });
+      } else {
+        await sendMessage(notifyId, manualPaidText).catch(() => {});
+      }
       await notifyAdmins(
         [
           `✅ <b>Order #${orderId} LUNAS (manual)</b>`,
@@ -2606,6 +2634,13 @@ async function handleCallback(query) {
       // pay_qris = bayar QRIS penuh TANPA pakai credit (credit disimpan). Selain itu pakai credit.
       session.useCredit = data !== "pay_qris";
       sessions.set(String(chatId), session);
+      const loadingText =
+        data === "pay_qris"
+          ? "⏳ <b>Membuat QRIS...</b>\nMohon tunggu sebentar."
+          : "⏳ <b>Memproses order...</b>\nSedang memasukkan order ke antrian.";
+      await editMessageText(chatId, query.message?.message_id, loadingText, {
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {});
     }
     return createOrderFromSession(chatId, from, query.message?.message_id);
   }
