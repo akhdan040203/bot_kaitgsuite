@@ -191,6 +191,63 @@ class EmulatorAutomator:
         self.log_info(f"exists result {exists}: {selector_kwargs}")
         return exists
 
+    def wait_payment_transition(self, label, targets=None, timeout=None):
+        """Tunggu transisi loading/redirect PSC/Play Store.
+        Kalau target sudah muncul, langsung return True. Kalau loading/redirect lelet,
+        tunggu sampai timeout. Return False hanya setelah benar-benar timeout."""
+        targets = targets or []
+        timeout = float(timeout if timeout is not None else os.getenv("PSC_TRANSITION_WAIT_SEC", "35"))
+        loading_texts = [
+            "Redirecting", "Loading", "Please wait", "One moment", "Mohon tunggu", "Memuat",
+        ]
+        deadline = time.time() + action_timeout(timeout)
+        last_state = None
+
+        def target_ready():
+            for target in targets:
+                try:
+                    if callable(target):
+                        if target():
+                            return True
+                    elif isinstance(target, str):
+                        if self.device(textContains=target).exists(timeout=0):
+                            return True
+                    elif isinstance(target, dict):
+                        if self.device(**target).exists(timeout=0):
+                            return True
+                except Exception:
+                    continue
+            return False
+
+        if target_ready():
+            self.log_info(f"{label}: target sudah ready, lanjut")
+            return True
+
+        self.log_info(f"{label}: tunggu loading/redirect maksimal {action_timeout(timeout)}s")
+        while time.time() < deadline:
+            self.dismiss_crash_dialogs()
+            if target_ready():
+                self.log_info(f"{label}: target ready")
+                return True
+            loading = False
+            for text in loading_texts:
+                try:
+                    if self.device(textContains=text).exists(timeout=0):
+                        loading = True
+                        if last_state != text:
+                            self.log_info(f"{label}: masih loading ({text})")
+                            last_state = text
+                        break
+                except Exception:
+                    continue
+            if not loading and last_state != "waiting":
+                self.log_info(f"{label}: menunggu elemen target...")
+                last_state = "waiting"
+            pause(0.5)
+
+        self.log_warn(f"{label}: timeout menunggu target/loading selesai")
+        return target_ready()
+
     def dismiss_crash_dialogs(self):
         """Close common Android/Google crash dialogs without changing the main flow."""
         dialog_buttons = [
@@ -1662,30 +1719,53 @@ class EmulatorAutomator:
                 
             self.log_info("Add PaysafeCard button found and clicked")
             self.emit_progress(email, 60, "klik add paysafecard")
-            pause(1)
+            self.wait_payment_transition(
+                "setelah klik Add PaysafeCard",
+                targets=[
+                    "Continue", "Lanjutkan",
+                    "PaysafeCard email", "PaysafeCard password", "Connect",
+                    "Complete your purchase",
+                ],
+            )
 
-            self.fast_click_text(["Continue", "CONTINUE", "Lanjutkan", "LANJUTKAN"])
-            pause(1)
+            if self.fast_click_text(["Continue", "CONTINUE", "Lanjutkan", "LANJUTKAN"], timeout=2):
+                self.wait_payment_transition(
+                    "setelah klik Continue PaysafeCard",
+                    targets=[
+                        {"className": "android.widget.EditText", "instance": 0},
+                        "PaysafeCard email", "PaysafeCard password", "Connect",
+                    ],
+                )
             
             # Input Paysafecard account used for connecting in Play Store.
-            if not self.set_text_fast(psc_email, timeout=5, className="android.widget.EditText", instance=0):
+            if not self.set_text_fast(psc_email, timeout=8, className="android.widget.EditText", instance=0):
                 self.log_error("Cannot find PaysafeCard email input")
                 self.fast_remove_google_account(email)
                 return False
-            if not self.set_text_fast(psc_pass, timeout=5, className="android.widget.EditText", instance=1):
+            if not self.set_text_fast(psc_pass, timeout=8, className="android.widget.EditText", instance=1):
                 self.log_error("Cannot find PaysafeCard password input")
                 self.fast_remove_google_account(email)
                 return False
             self.emit_progress(email, 70, "isi akun paysafecard")
-            pause(5)
+            self.wait_payment_transition(
+                "setelah isi akun PaysafeCard",
+                targets=["Connect", "CONNECT"],
+                timeout=float(os.getenv("PSC_FORM_READY_WAIT_SEC", "35")),
+            )
             if self.exists_fast(timeout=2, text="Connect"):
                 self.log_info("Connect button detected")
-            pause(2)
             self.click_connect_button()
             self.emit_progress(email, 80, "klik connect")
+            self.wait_payment_transition(
+                "setelah klik Connect PaysafeCard",
+                targets=[
+                    "Complete sign up", "Complete signup", "Full name", "Save", "Simpan",
+                    "Payment methods", "Metode pembayaran",
+                    lambda: self.has_paysafecard_payment_method(timeout=0),
+                ],
+                timeout=float(os.getenv("PSC_AFTER_CONNECT_WAIT_SEC", "60")),
+            )
             self.handle_connect_error_and_retry(max_retry=int(os.getenv("PSC_CONNECT_RETRY", "5")))
-            pause(2)
-            pause(2)
 
             # Wait for DOKU e-Wallet process
             if self.exists_fast(timeout=3, text="PaysafeCard"):
@@ -1695,13 +1775,27 @@ class EmulatorAutomator:
             if self.exists_fast(timeout=5, text="Complete sign up"):
                 self.device(text="Full name").click()
                 pause(0.5)
-                self.set_text_fast("indonesian", timeout=3, text="Full name")
+                self.set_text_fast("indonesian", timeout=5, text="Full name")
                 # Sebagian negara butuh pilih Province (mis. Spain -> Asturias). Pilih sesuai region.
                 self.fill_signup_province()
                 self.fast_click_text(["Save", "SAVE", "Simpan", "SIMPAN"])
-                pause(3)
+                self.wait_payment_transition(
+                    "setelah klik Save Complete sign up",
+                    targets=[
+                        "Payment methods", "Metode pembayaran",
+                        lambda: self.has_paysafecard_payment_method(timeout=0),
+                    ],
+                    timeout=float(os.getenv("PSC_AFTER_SAVE_WAIT_SEC", "45")),
+                )
 
-            pause(3)
+            self.wait_payment_transition(
+                "sebelum verifikasi PaysafeCard",
+                targets=[
+                    "Payment methods", "Metode pembayaran",
+                    lambda: self.has_paysafecard_payment_method(timeout=0),
+                ],
+                timeout=float(os.getenv("PSC_BEFORE_VERIFY_WAIT_SEC", "35")),
+            )
 
             # Verifikasi. Kalau app sempat FORCE-CLOSE ke home (sering pas isi nama / after pay),
             # cek pertama bisa gagal karena Play Store tidak di halaman payment. PaysafeCard tetap
